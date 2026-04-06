@@ -412,8 +412,11 @@ float get_game_volume()
     return gameMusicVol;
 
 }
-
-
+uintptr_t sub_935B80;
+void gameplay_loop()
+{
+    cdecl_call(sub_935B80);
+}
 
 void radio_tuner_update_hook(uintptr_t vehicle) 
 {
@@ -463,6 +466,8 @@ void MainHook()
     InterceptCall(0x5202A2, sub_9551F0, late_init);
     InterceptCall(0xAA4FD6, object_free_this_addr, object_free_this_hook);
     InterceptCall(0xAA4FF7, object_free_this_addr, object_free_this_hook);
+
+    InterceptCall(0x68CEC8, sub_935B80, gameplay_loop);
 
     Patch<void*>((0xAE2B0B + 1), &vehicle_create_callback_addr);
 }
