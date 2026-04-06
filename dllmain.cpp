@@ -442,13 +442,17 @@ void __fastcall object_free_this_hook(uintptr_t obj) {
     if (CSRadio) {
         CSRadio->Reset(true);
     }
+    cdecl_call(object_free_this_addr);
 }
 
 
 
 void vehicle_create_callback(uintptr_t obj)
 {
-
+    auto CSRadio = vehicle_get_selfradio(obj);
+    if (CSRadio) {
+        CSRadio->flags.object_alive = 1;
+    }
 }
 
 void* vehicle_create_callback_addr = vehicle_create_callback;
