@@ -63,6 +63,9 @@
     <ClInclude Include="include\fmod\fmod_output.h">
       <Filter>Source Files\include\fmod</Filter>
     </ClInclude>
+    <ClInclude Include="BlingMenu_public.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">

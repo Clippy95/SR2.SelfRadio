@@ -446,7 +446,7 @@ float get_game_volume()
         return 0.f;
     }
 
-    float gameMusicVol = *(float*)0x00EE34E0 / 4.0f;
+    float gameMusicVol = *(float*)0x00EE34E0 / 3.0f;
     return gameMusicVol;
 
 }
@@ -507,20 +507,31 @@ bool self_radio_start_playback(uintptr_t vehicle, CSelfRadio* csr, radio_inst* r
     return true;
 }
 
-void self_radio_stop_playback(CSelfRadio* csr)
+void self_radio_stop_playback(CSelfRadio* csr, bool preserve_seek = false)
 {
     if (!csr)
         return;
 
     if (csr->channel)
+    {
+        if (preserve_seek)
+        {
+            unsigned int position_ms = 0;
+            if (csr->channel->getPosition(&position_ms, FMOD_TIMEUNIT_MS) == FMOD_OK)
+                csr->seek_ms = position_ms;
+        }
+
         csr->channel->stop();
+    }
 
     csr->channel = nullptr;
     csr->current_sound = nullptr;
     csr->flags.is_playing = 0;
     csr->flags.pending_start = 0;
     csr->flags.pending_stop = 0;
-    csr->seek_ms = 0;
+
+    if (!preserve_seek)
+        csr->seek_ms = 0;
 }
 
 void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
@@ -546,7 +557,7 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
     if (!is_self_station)
     {
         if (csr->flags.is_playing || csr->flags.pending_start)
-            self_radio_stop_playback(csr);
+            self_radio_stop_playback(csr, true);
         return;
     }
 

@@ -195,6 +195,7 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="BlingMenu_public.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="include\fmod\fmod.h" />
     <ClInclude Include="include\fmod\fmod.hpp" />
