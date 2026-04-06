@@ -1,15 +1,21 @@
 // dllmain.cpp : Defines the entry point for the DLL application.
 #include "pch.h"
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <unordered_set>
 #include <vector>
+#include <safetyhook.hpp>
 
 namespace fs = std::filesystem;
 
+constexpr uint64_t kSelfRadioInitialStartDelayMs = 1500;
+
 HMODULE g_dll_module = nullptr;
+class CSelfRadio;
 
 struct SelfRadioSong
 {
@@ -41,6 +47,7 @@ public:
             return 0;
 
         std::unordered_set<std::string> seen_dirs;
+        printf("[SelfRadio] Reloading songs...\n");
         LoadSongsFromDirectory(GetExeDirectory() / "SelfRadio", seen_dirs);
         LoadSongsFromDirectory(GetDllDirectoryS() / "SelfRadio", seen_dirs);
 
@@ -50,6 +57,7 @@ public:
             return lhs.path.string() < rhs.path.string();
         });
 
+        printf("[SelfRadio] Loaded %zu song(s)\n", m_songs.size());
         return m_songs.size();
     }
 
@@ -152,6 +160,8 @@ private:
         if (!seen_dirs.emplace(normalized_dir).second)
             return;
 
+        printf("[SelfRadio] Scanning: %s\n", directory.string().c_str());
+
         for (const fs::directory_entry& entry : fs::directory_iterator(directory))
         {
             if (!entry.is_regular_file())
@@ -175,6 +185,7 @@ private:
             song.name = MakeSongName(song_path);
             song.path = song_path;
             song.sound = sound;
+            printf("[SelfRadio] Found song: %s (%s)\n", song.name.c_str(), song.path.string().c_str());
             m_songs.push_back(std::move(song));
         }
     }
@@ -201,6 +212,7 @@ private:
 };
 
 SelfRadioSongLibrary g_self_radio_song_library;
+std::vector<CSelfRadio*> g_self_radios;
 
 bool self_radio_init()
 {
@@ -215,6 +227,12 @@ size_t self_radio_reload_songs()
 const std::vector<SelfRadioSong>& self_radio_get_songs()
 {
     return g_self_radio_song_library.GetSongs();
+}
+
+static uint64_t self_radio_now_ms()
+{
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
 void set_uint(uintptr_t ptr, uintptr_t addr_lo, uintptr_t addr_hi)
@@ -237,19 +255,16 @@ BYTE havok_paused() {
     return (*(BYTE*)0x2526D28 || *(BYTE*)0x2527CB6);
 }
 
-const FMOD_VECTOR* object_get_pos(uintptr_t* obj) {
-    if (obj) {
-
-        // idk
-    //    FMOD_VECTOR obj_pos = {
-    //*(float*)obj + 0x14,  // X
-    //*(float*)obj + 0x1C,  // Y
-    //*(float*)obj + 0x18   // Z
-    //    };
-
-        return (FMOD_VECTOR*)(obj + 0x14);
+FMOD_VECTOR object_get_pos(uintptr_t obj)
+{
+    FMOD_VECTOR pos{};
+    if (obj)
+    {
+        pos.x = *(float*)(obj + 0x14);
+        pos.y = *(float*)(obj + 0x1C);
+        pos.z = *(float*)(obj + 0x18);
     }
-    return nullptr; // return default if null
+    return pos;
 }
 
 FMOD_VECTOR player_get_pos() {
@@ -280,6 +295,7 @@ public:
     uint64_t start_at_ms = 0;         // delayed start after station switch
     uint64_t track_started_at_ms = 0; // when current track began
     uint32_t seek_ms = 0;             // current seek position if resumed
+    uintptr_t object = 0;
 
     float volume_scale = 1.0f;        // final effective scalar you send to FMOD
     float user_lpf = 0.0f;            // if you want to mirror muffling/submersion
@@ -303,6 +319,7 @@ public:
         start_at_ms = 0;
         track_started_at_ms = 0;
         seek_ms = 0;
+        object = 0;
         volume_scale = 1.0f;
         user_lpf = 0.0f;
         object_pos = {};
@@ -312,6 +329,22 @@ public:
     }
 
 };
+
+void self_radio_register(CSelfRadio* csr)
+{
+    if (!csr)
+        return;
+
+    if (std::find(g_self_radios.begin(), g_self_radios.end(), csr) == g_self_radios.end())
+        g_self_radios.push_back(csr);
+}
+
+void self_radio_unregister_dead()
+{
+    std::erase_if(g_self_radios, [](CSelfRadio* csr) {
+        return csr == nullptr || !csr->flags.object_alive;
+    });
+}
 
 
 struct play_inst
@@ -361,7 +394,7 @@ CSelfRadio* vehicle_get_selfradio(uintptr_t vehicle) {
 radio_inst* vehicle_get_radio_inst(uintptr_t vehicle) 
 {
     if (vehicle) {
-        return (radio_inst*)(vehicle + 0x8D24);
+        return (radio_inst*)(vehicle + 0x8D38);
     }
     return nullptr;
 }
@@ -372,15 +405,19 @@ uintptr_t __fastcall vehicle_construct(uintptr_t thisa) {
     auto obj = thiscall_call<uintptr_t>(vehicle_construct_og,thisa);
     if (obj) {
         auto test = new CSelfRadio();
+        test->object = obj;
+        test->flags.object_alive = 1;
+        test->playback_seed = static_cast<uint32_t>(obj);
+        self_radio_register(test);
         set_uint((uintptr_t)test, obj + 0x4A, obj + 0xA9);
     }
     return obj;
 }
-
+int self_radio_Station = -1;
 bool is_radio_station_self_radio(radio_inst* radioi)
 {
     // temp
-    const int self_radio_Station = 50;
+
     if (radioi) {
         return radioi->station == self_radio_Station;
     }
@@ -402,9 +439,10 @@ int radio_tuner_should_be_2d_for_vehicle(uintptr_t vehicle) {
     return result;
 }
 bool* game_focus = (bool*)0x252A406;
+float g_cached_game_volume = 0.0f;
 float get_game_volume()
 {
-    if (!*game_focus || havok_paused()) {
+    if (*game_focus == false || havok_paused() ) {
         return 0.f;
     }
 
@@ -413,22 +451,191 @@ float get_game_volume()
 
 }
 uintptr_t sub_935B80;
+void self_radio_refresh_runtime_state(uintptr_t vehicle, CSelfRadio* csr)
+{
+    if (!csr)
+        return;
+
+    csr->flags.is_2d = radio_tuner_should_be_2d_for_vehicle(vehicle) != 0;
+    csr->object_pos = object_get_pos(vehicle);
+    csr->volume_scale = 1.0f;
+}
+
+bool self_radio_start_playback(uintptr_t vehicle, CSelfRadio* csr, radio_inst* radioi)
+{
+    auto* system = g_self_radio_song_library.GetSystem();
+    const auto& songs = self_radio_get_songs();
+    if (!system || songs.empty() || !csr || !radioi)
+        return false;
+
+    if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
+        csr->current_track_index = static_cast<int>(csr->playback_seed % songs.size());
+
+    const SelfRadioSong& song = songs[csr->current_track_index];
+    if (!song.sound)
+        return false;
+
+    FMOD::Channel* channel = nullptr;
+    if (system->playSound(song.sound, nullptr, true, &channel) != FMOD_OK || !channel)
+        return false;
+
+    // Dynamic state is refreshed from the vehicle every radio update.
+    self_radio_refresh_runtime_state(vehicle, csr);
+
+    if (csr->flags.is_2d)
+    {
+        channel->setMode(FMOD_2D);
+    }
+    else
+    {
+        channel->setMode(FMOD_3D);
+        channel->set3DAttributes(&csr->object_pos, &csr->object_vel);
+        channel->set3DMinMaxDistance(2.0f, 45.0f);
+    }
+
+    channel->setVolume(g_cached_game_volume);
+    if (csr->seek_ms)
+        channel->setPosition(csr->seek_ms, FMOD_TIMEUNIT_MS);
+    channel->setPaused(false);
+
+    csr->channel = channel;
+    csr->current_sound = song.sound;
+    csr->track_started_at_ms = self_radio_now_ms() - csr->seek_ms;
+    csr->flags.is_playing = 1;
+    csr->flags.pending_start = 0;
+    csr->flags.pending_stop = 0;
+    return true;
+}
+
+void self_radio_stop_playback(CSelfRadio* csr)
+{
+    if (!csr)
+        return;
+
+    if (csr->channel)
+        csr->channel->stop();
+
+    csr->channel = nullptr;
+    csr->current_sound = nullptr;
+    csr->flags.is_playing = 0;
+    csr->flags.pending_start = 0;
+    csr->flags.pending_stop = 0;
+    csr->seek_ms = 0;
+}
+
+void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
+{
+    if (!csr || !csr->flags.object_alive || !csr->object)
+        return;
+
+    const uintptr_t vehicle = csr->object;
+    auto* radioi = vehicle_get_radio_inst(vehicle);
+    if (!radioi)
+        return;
+
+    const auto& songs = self_radio_get_songs();
+    if (songs.empty() || !g_self_radio_song_library.GetSystem())
+    {
+        self_radio_stop_playback(csr);
+        return;
+    }
+
+    const bool is_self_station = is_radio_station_self_radio(radioi);
+    const uint64_t now_ms = self_radio_now_ms();
+
+    if (!is_self_station)
+    {
+        if (csr->flags.is_playing || csr->flags.pending_start)
+            self_radio_stop_playback(csr);
+        return;
+    }
+
+    // This is per-vehicle, per-update state, not one-time start state.
+    self_radio_refresh_runtime_state(vehicle, csr);
+
+    if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
+        csr->current_track_index = static_cast<int>(csr->playback_seed % songs.size());
+
+    if (csr->channel)
+    {
+        bool channel_playing = false;
+        if (csr->channel->isPlaying(&channel_playing) != FMOD_OK)
+            channel_playing = false;
+
+        if (!channel_playing)
+        {
+            csr->channel = nullptr;
+            csr->current_sound = nullptr;
+            csr->flags.is_playing = 0;
+            csr->seek_ms = 0;
+            csr->current_track_index = (csr->current_track_index + 1) % static_cast<int>(songs.size());
+            csr->flags.pending_start = 1;
+            csr->start_at_ms = now_ms;
+        }
+    }
+
+    if (csr->flags.is_playing && csr->channel)
+    {
+        if (csr->flags.is_2d)
+        {
+            csr->channel->setMode(FMOD_2D);
+        }
+        else
+        {
+            csr->channel->setMode(FMOD_3D);
+            csr->channel->set3DAttributes(&csr->object_pos, &csr->object_vel);
+        }
+
+        unsigned int position_ms = 0;
+        if (csr->channel->getPosition(&position_ms, FMOD_TIMEUNIT_MS) == FMOD_OK)
+            csr->seek_ms = position_ms;
+        return;
+    }
+
+    if (!csr->flags.pending_start)
+    {
+        csr->flags.pending_start = 1;
+        csr->start_at_ms = now_ms + (switched_to_self_radio ? kSelfRadioInitialStartDelayMs : 0);
+    }
+
+    if (csr->flags.pending_start && now_ms >= csr->start_at_ms)
+        self_radio_start_playback(vehicle, csr, radioi);
+}
+
 void gameplay_loop()
 {
     cdecl_call(sub_935B80);
+    g_cached_game_volume = get_game_volume();
+
+    for (CSelfRadio* csr : g_self_radios)
+    {
+        if (!csr || !csr->channel)
+            continue;
+
+        csr->channel->setVolume(g_cached_game_volume);
+    }
+
+    if (auto* system = g_self_radio_song_library.GetSystem())
+        system->update();
 }
 
 void radio_tuner_update_hook(uintptr_t vehicle) 
 {
-    cdecl_call<void>(radio_tuner_update_og, vehicle);
-    auto CSRadio = vehicle_get_selfradio(vehicle);
-    auto radioi = vehicle_get_radio_inst(vehicle);
-    if (radioi && CSRadio && CSRadio->flags.object_alive)
-    {
-        if (radioi->last_station != radioi->station && is_radio_station_self_radio(radioi)) {
+    auto radioi_before = vehicle_get_radio_inst(vehicle);
+    const bool switched_to_self_radio =
+        radioi_before &&
+        is_radio_station_self_radio(radioi_before) &&
+        radioi_before->last_station != radioi_before->station;
 
-        }
-    }
+    cdecl_call<void>(radio_tuner_update_og, vehicle);
+    auto csr = vehicle_get_selfradio(vehicle);
+    if (!csr)
+        return;
+
+    csr->flags.object_alive = 1;
+    csr->object = vehicle;
+
+    self_radio_update(csr, switched_to_self_radio);
 
 }
 
@@ -437,15 +644,21 @@ void late_init()
 {
     cdecl_call(sub_9551F0);
     self_radio_init();
+
+    self_radio_Station = thiscall_call<int>(0x4904F0, "SELF RADIO");
+    printf("SELF RAIDO1!! %d\n\n\n\n\n\n\n\n\n\n\n\n\n\n", self_radio_Station);
 }
 
 uintptr_t object_free_this_addr;
+SafetyHookInline vehicle_free_thisD;
+
 void __fastcall object_free_this_hook(uintptr_t obj) {
     auto CSRadio = vehicle_get_selfradio(obj);
     if (CSRadio) {
         CSRadio->Reset(true);
+        CSRadio->flags.object_alive = 0;
     }
-    cdecl_call(object_free_this_addr);
+    vehicle_free_thisD.unsafe_thiscall(obj);
 }
 
 
@@ -455,19 +668,33 @@ void vehicle_create_callback(uintptr_t obj)
     auto CSRadio = vehicle_get_selfradio(obj);
     if (CSRadio) {
         CSRadio->flags.object_alive = 1;
+        CSRadio->object = obj;
+        CSRadio->playback_seed = static_cast<uint32_t>(obj);
+        self_radio_register(CSRadio);
     }
+}
+
+void ensure_console() {
+    AllocConsole();
+    freopen("CONOUT$", "w", stdout);
+    freopen("CONOUT$", "w", stderr);
 }
 
 void* vehicle_create_callback_addr = vehicle_create_callback;
 
 void MainHook()
 {
+    ensure_console();
     InterceptCall(0xDB2142, vehicle_construct_og, vehicle_construct);
     InterceptCall(0x5202A2, sub_9551F0, late_init);
-    InterceptCall(0xAA4FD6, object_free_this_addr, object_free_this_hook);
-    InterceptCall(0xAA4FF7, object_free_this_addr, object_free_this_hook);
+    //InterceptCall(0xAA4FD6, object_free_this_addr, object_free_this_hook);
+    //InterceptCall(0xAA4FF7, object_free_this_addr, object_free_this_hook);
 
-    InterceptCall(0x68CEC8, sub_935B80, gameplay_loop);
+    vehicle_free_thisD = safetyhook::create_inline(0xAA4A40, object_free_this_hook);
+
+    InterceptCall(0x5205FB, sub_935B80, gameplay_loop);
+
+    InterceptCall(0x489A51, radio_tuner_update_og, radio_tuner_update_hook);
 
     Patch<void*>((0xAE2B0B + 1), &vehicle_create_callback_addr);
 }
@@ -495,8 +722,8 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     case DLL_THREAD_ATTACH:
     case DLL_THREAD_DETACH:
     case DLL_PROCESS_DETACH:
-        if (ul_reason_for_call == DLL_PROCESS_DETACH)
-            g_self_radio_song_library.Shutdown();
+        //if (ul_reason_for_call == DLL_PROCESS_DETACH)
+        //    g_self_radio_song_library.Shutdown();
         break;
     }
     return TRUE;
