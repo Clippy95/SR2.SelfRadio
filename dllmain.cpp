@@ -91,7 +91,7 @@ public:
     }
 
 private:
-    static bool IsMp3File(const fs::path& path)
+    static bool IsSupportedAudioFile(const fs::path& path)
     {
         if (!path.has_extension())
             return false;
@@ -101,7 +101,11 @@ private:
             return static_cast<char>(std::tolower(ch));
         });
 
-        return ext == ".mp3";
+        return ext == ".mp3"
+            || ext == ".flac"
+            || ext == ".wav"
+            || ext == ".ogg"
+            || ext == ".opus";
     }
 
     static std::string NormalizePathString(const fs::path& path)
@@ -168,7 +172,7 @@ private:
                 continue;
 
             const fs::path song_path = entry.path();
-            if (!IsMp3File(song_path))
+            if (!IsSupportedAudioFile(song_path))
                 continue;
 
             FMOD::Sound* sound = nullptr;
