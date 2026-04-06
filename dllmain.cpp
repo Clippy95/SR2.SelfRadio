@@ -41,8 +41,8 @@ public:
             return 0;
 
         std::unordered_set<std::string> seen_dirs;
-        LoadSongsFromDirectory(GetExeDirectory(), seen_dirs);
-        LoadSongsFromDirectory(GetDllDirectory(), seen_dirs);
+        LoadSongsFromDirectory(GetExeDirectory() / "SelfRadio", seen_dirs);
+        LoadSongsFromDirectory(GetDllDirectoryS() / "SelfRadio", seen_dirs);
 
         std::sort(m_songs.begin(), m_songs.end(), [](const SelfRadioSong& lhs, const SelfRadioSong& rhs) {
             if (lhs.name != rhs.name)
@@ -117,7 +117,7 @@ private:
         return fs::path(buffer).parent_path();
     }
 
-    fs::path GetDllDirectory() const
+    fs::path GetDllDirectoryS() const
     {
         char buffer[MAX_PATH]{};
         GetModuleFileNameA(m_module, buffer, static_cast<DWORD>(std::size(buffer)));
@@ -233,7 +233,7 @@ uintptr_t get_uint(uintptr_t addr_lo, uintptr_t addr_hi)
     return static_cast<uintptr_t>(lo | (hi << 16));
 }
 
-BYTE havok_pasued() {
+BYTE havok_paused() {
     return (*(BYTE*)0x2526D28 || *(BYTE*)0x2527CB6);
 }
 
@@ -289,6 +289,28 @@ public:
 
     FMOD::Channel* channel = nullptr;
     FMOD::Sound* current_sound = nullptr;
+
+    void Reset(bool stop_audio = false)
+    {
+        if (stop_audio && channel) {
+            channel->stop();
+        }
+
+        flags = {};
+        vehicle_handle = 0;
+        current_track_index = -1;
+        playback_seed = 0;
+        start_at_ms = 0;
+        track_started_at_ms = 0;
+        seek_ms = 0;
+        volume_scale = 1.0f;
+        user_lpf = 0.0f;
+        object_pos = {};
+        object_vel = {};
+        channel = nullptr;
+        current_sound = nullptr;
+    }
+
 };
 
 
@@ -366,24 +388,71 @@ bool is_radio_station_self_radio(radio_inst* radioi)
 }
 
 uintptr_t radio_tuner_update_og;
+
+uintptr_t radio_tuner_should_be_2d_for_vehicle_addr = 0x48C500;
+int radio_tuner_should_be_2d_for_vehicle(uintptr_t vehicle) {
+    int result;
+    __asm {
+        push esi
+        mov esi,vehicle
+        call radio_tuner_should_be_2d_for_vehicle_addr
+        mov result eax
+        pop esi
+    }
+    return result;
+}
+bool* game_focus = (bool*)0x252A406;
+float get_game_volume()
+{
+    if (!*game_focus || havok_paused()) {
+        return 0.f;
+    }
+
+    float gameMusicVol = *(float*)0x00EE34E0 / 4.0f;
+    return gameMusicVol;
+
+}
+
+
+
 void radio_tuner_update_hook(uintptr_t vehicle) 
 {
     cdecl_call<void>(radio_tuner_update_og, vehicle);
     auto CSRadio = vehicle_get_selfradio(vehicle);
     auto radioi = vehicle_get_radio_inst(vehicle);
-    if (radioi && CSRadio)
+    if (radioi && CSRadio && CSRadio->flags.object_alive)
     {
         if (radioi->last_station != radioi->station && is_radio_station_self_radio(radioi)) {
-            CSRadio->flags.is_playing = 1;
+
         }
     }
 
 }
 
+uintptr_t sub_9551F0;
+void late_init()
+{
+    cdecl_call(sub_9551F0);
+    self_radio_init();
+}
+
+uintptr_t object_free_this_addr;
+void __fastcall object_free_this_hook(uintptr_t obj) {
+    auto CSRadio = vehicle_get_selfradio(obj);
+    if (CSRadio) {
+        CSRadio->Reset(true);
+    }
+}
+
 void MainHook()
 {
     InterceptCall(0xDB2142, vehicle_construct_og, vehicle_construct);
+    InterceptCall(0x9551F0, sub_9551F0, late_init);
+    InterceptCall(0xAA4FD6, object_free_this_addr, object_free_this_hook);
+    InterceptCall(0xAA4FF7, object_free_this_addr, object_free_this_hook);
 }
+
+
 
 BOOL APIENTRY DllMain( HMODULE hModule,
                        DWORD  ul_reason_for_call,
