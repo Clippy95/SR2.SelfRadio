@@ -8,6 +8,7 @@
 #include <string_view>
 #include <unordered_set>
 #include <vector>
+#include <shobjidl.h>
 #include <safetyhook.hpp>
 #include "BlingMenu_public.h"
 namespace fs = std::filesystem;
@@ -91,21 +92,65 @@ public:
     }
 
 private:
-    static bool IsSupportedAudioFile(const fs::path& path)
+    static std::string GetLowercaseExtension(const fs::path& path)
     {
         if (!path.has_extension())
-            return false;
+            return {};
 
         std::string ext = path.extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
             return static_cast<char>(std::tolower(ch));
         });
 
-        return ext == ".mp3"
-            || ext == ".flac"
-            || ext == ".wav"
-            || ext == ".ogg"
-            || ext == ".opus";
+        return ext;
+    }
+
+    static bool IsShortcutFile(const fs::path& path)
+    {
+        return GetLowercaseExtension(path) == ".lnk";
+    }
+
+    static bool TryResolveShortcutTarget(const fs::path& shortcut_path, fs::path& target_path)
+    {
+        HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        const bool should_uninitialize = SUCCEEDED(hr);
+        if (FAILED(hr) && hr != RPC_E_CHANGED_MODE)
+            return false;
+
+        IShellLinkW* shell_link = nullptr;
+        IPersistFile* persist_file = nullptr;
+        wchar_t resolved_path[MAX_PATH]{};
+        WIN32_FIND_DATAW find_data{};
+        bool resolved = false;
+
+        hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, reinterpret_cast<void**>(&shell_link));
+        if (FAILED(hr) || !shell_link)
+            goto Cleanup;
+
+        hr = shell_link->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&persist_file));
+        if (FAILED(hr) || !persist_file)
+            goto Cleanup;
+
+        hr = persist_file->Load(shortcut_path.c_str(), STGM_READ);
+        if (FAILED(hr))
+            goto Cleanup;
+
+        hr = shell_link->GetPath(resolved_path, static_cast<int>(std::size(resolved_path)), &find_data, SLGP_RAWPATH);
+        if (FAILED(hr) || resolved_path[0] == L'\0')
+            goto Cleanup;
+
+        target_path = fs::path(resolved_path);
+        resolved = true;
+
+    Cleanup:
+        if (persist_file)
+            persist_file->Release();
+        if (shell_link)
+            shell_link->Release();
+        if (should_uninitialize)
+            CoUninitialize();
+
+        return resolved;
     }
 
     static std::string NormalizePathString(const fs::path& path)
@@ -171,9 +216,13 @@ private:
             if (!entry.is_regular_file())
                 continue;
 
-            const fs::path song_path = entry.path();
-            if (!IsSupportedAudioFile(song_path))
+            const fs::path source_path = entry.path();
+            fs::path song_path = source_path;
+            if (IsShortcutFile(source_path) && !TryResolveShortcutTarget(source_path, song_path))
+            {
+                printf("[SelfRadio] Failed to resolve shortcut: %s\n", source_path.string().c_str());
                 continue;
+            }
 
             FMOD::Sound* sound = nullptr;
             const FMOD_RESULT result = m_system->createStream(
@@ -186,7 +235,7 @@ private:
                 continue;
 
             SelfRadioSong song{};
-            song.name = MakeSongName(song_path);
+            song.name = MakeSongName(source_path);
             song.path = song_path;
             song.sound = sound;
             printf("[SelfRadio] Found song: %s (%s)\n", song.name.c_str(), song.path.string().c_str());
