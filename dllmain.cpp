@@ -396,7 +396,7 @@ int radio_tuner_should_be_2d_for_vehicle(uintptr_t vehicle) {
         push esi
         mov esi,vehicle
         call radio_tuner_should_be_2d_for_vehicle_addr
-        mov result eax
+        mov result, eax
         pop esi
     }
     return result;
@@ -444,12 +444,23 @@ void __fastcall object_free_this_hook(uintptr_t obj) {
     }
 }
 
+
+
+void vehicle_create_callback(uintptr_t obj)
+{
+
+}
+
+void* vehicle_create_callback_addr = vehicle_create_callback;
+
 void MainHook()
 {
     InterceptCall(0xDB2142, vehicle_construct_og, vehicle_construct);
     InterceptCall(0x9551F0, sub_9551F0, late_init);
     InterceptCall(0xAA4FD6, object_free_this_addr, object_free_this_hook);
     InterceptCall(0xAA4FF7, object_free_this_addr, object_free_this_hook);
+
+    Patch<void*>((0xAE2B0B + 1), &vehicle_create_callback);
 }
 
 
