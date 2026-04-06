@@ -9,7 +9,7 @@
 #include <unordered_set>
 #include <vector>
 #include <safetyhook.hpp>
-
+#include "BlingMenu_public.h"
 namespace fs = std::filesystem;
 
 constexpr uint64_t kSelfRadioInitialStartDelayMs = 1500;
@@ -651,6 +651,13 @@ void radio_tuner_update_hook(uintptr_t vehicle)
 }
 
 uintptr_t sub_9551F0;
+
+void BlingMenuOptions() {
+    if (BlingMenuLoad()) {
+        
+    }
+}
+
 void late_init()
 {
     cdecl_call(sub_9551F0);
