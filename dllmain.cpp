@@ -1,5 +1,221 @@
 // dllmain.cpp : Defines the entry point for the DLL application.
 #include "pch.h"
+#include <algorithm>
+#include <filesystem>
+#include <string>
+#include <string_view>
+#include <unordered_set>
+#include <vector>
+
+namespace fs = std::filesystem;
+
+HMODULE g_dll_module = nullptr;
+
+struct SelfRadioSong
+{
+    std::string name;
+    fs::path path;
+    FMOD::Sound* sound = nullptr;
+};
+
+class SelfRadioSongLibrary
+{
+public:
+    bool Init(HMODULE module)
+    {
+        m_module = module;
+
+        if (!EnsureFMOD())
+            return false;
+
+        ReloadSongs();
+        m_initialized = true;
+        return true;
+    }
+
+    size_t ReloadSongs()
+    {
+        ReleaseSongs();
+
+        if (!EnsureFMOD())
+            return 0;
+
+        std::unordered_set<std::string> seen_dirs;
+        LoadSongsFromDirectory(GetExeDirectory(), seen_dirs);
+        LoadSongsFromDirectory(GetDllDirectory(), seen_dirs);
+
+        std::sort(m_songs.begin(), m_songs.end(), [](const SelfRadioSong& lhs, const SelfRadioSong& rhs) {
+            if (lhs.name != rhs.name)
+                return lhs.name < rhs.name;
+            return lhs.path.string() < rhs.path.string();
+        });
+
+        return m_songs.size();
+    }
+
+    void Shutdown()
+    {
+        ReleaseSongs();
+
+        if (m_system)
+        {
+            m_system->close();
+            m_system->release();
+            m_system = nullptr;
+        }
+
+        m_initialized = false;
+    }
+
+    const std::vector<SelfRadioSong>& GetSongs() const
+    {
+        return m_songs;
+    }
+
+    FMOD::System* GetSystem() const
+    {
+        return m_system;
+    }
+
+    bool IsInitialized() const
+    {
+        return m_initialized;
+    }
+
+private:
+    static bool IsMp3File(const fs::path& path)
+    {
+        if (!path.has_extension())
+            return false;
+
+        std::string ext = path.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+
+        return ext == ".mp3";
+    }
+
+    static std::string NormalizePathString(const fs::path& path)
+    {
+        std::string value = path.lexically_normal().string();
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        return value;
+    }
+
+    static std::string MakeSongName(const fs::path& path)
+    {
+        return path.stem().string();
+    }
+
+    fs::path GetExeDirectory() const
+    {
+        char buffer[MAX_PATH]{};
+        GetModuleFileNameA(nullptr, buffer, static_cast<DWORD>(std::size(buffer)));
+        return fs::path(buffer).parent_path();
+    }
+
+    fs::path GetDllDirectory() const
+    {
+        char buffer[MAX_PATH]{};
+        GetModuleFileNameA(m_module, buffer, static_cast<DWORD>(std::size(buffer)));
+        return fs::path(buffer).parent_path();
+    }
+
+    bool EnsureFMOD()
+    {
+        if (m_system)
+            return true;
+
+        FMOD::System* system = nullptr;
+        if (FMOD::System_Create(&system) != FMOD_OK || !system)
+            return false;
+
+        if (system->init(512, FMOD_INIT_NORMAL, nullptr) != FMOD_OK)
+        {
+            system->release();
+            return false;
+        }
+
+        m_system = system;
+        return true;
+    }
+
+    void LoadSongsFromDirectory(const fs::path& directory, std::unordered_set<std::string>& seen_dirs)
+    {
+        if (directory.empty() || !fs::exists(directory) || !fs::is_directory(directory))
+            return;
+
+        const std::string normalized_dir = NormalizePathString(directory);
+        if (!seen_dirs.emplace(normalized_dir).second)
+            return;
+
+        for (const fs::directory_entry& entry : fs::directory_iterator(directory))
+        {
+            if (!entry.is_regular_file())
+                continue;
+
+            const fs::path song_path = entry.path();
+            if (!IsMp3File(song_path))
+                continue;
+
+            FMOD::Sound* sound = nullptr;
+            const FMOD_RESULT result = m_system->createStream(
+                song_path.string().c_str(),
+                FMOD_CREATESTREAM | FMOD_LOOP_OFF,
+                nullptr,
+                &sound);
+
+            if (result != FMOD_OK || !sound)
+                continue;
+
+            SelfRadioSong song{};
+            song.name = MakeSongName(song_path);
+            song.path = song_path;
+            song.sound = sound;
+            m_songs.push_back(std::move(song));
+        }
+    }
+
+    void ReleaseSongs()
+    {
+        for (SelfRadioSong& song : m_songs)
+        {
+            if (song.sound)
+            {
+                song.sound->release();
+                song.sound = nullptr;
+            }
+        }
+
+        m_songs.clear();
+    }
+
+private:
+    HMODULE m_module = nullptr;
+    FMOD::System* m_system = nullptr;
+    std::vector<SelfRadioSong> m_songs;
+    bool m_initialized = false;
+};
+
+SelfRadioSongLibrary g_self_radio_song_library;
+
+bool self_radio_init()
+{
+    return g_self_radio_song_library.Init(g_dll_module);
+}
+
+size_t self_radio_reload_songs()
+{
+    return g_self_radio_song_library.ReloadSongs();
+}
+
+const std::vector<SelfRadioSong>& self_radio_get_songs()
+{
+    return g_self_radio_song_library.GetSongs();
+}
 
 void set_uint(uintptr_t ptr, uintptr_t addr_lo, uintptr_t addr_hi)
 {
@@ -144,7 +360,7 @@ bool is_radio_station_self_radio(radio_inst* radioi)
     // temp
     const int self_radio_Station = 50;
     if (radioi) {
-        radioi->station == self_radio_Station;
+        return radioi->station == self_radio_Station;
     }
     return false;
 }
@@ -179,6 +395,7 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     case DLL_PROCESS_ATTACH:
 
     {
+        g_dll_module = hModule;
         MainHook();
         HMODULE moduleHandle;
         // idk why but this makes it not DETATCH prematurely
@@ -189,6 +406,8 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     case DLL_THREAD_ATTACH:
     case DLL_THREAD_DETACH:
     case DLL_PROCESS_DETACH:
+        if (ul_reason_for_call == DLL_PROCESS_DETACH)
+            g_self_radio_song_library.Shutdown();
         break;
     }
     return TRUE;
