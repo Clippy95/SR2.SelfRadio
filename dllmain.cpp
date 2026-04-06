@@ -456,11 +456,11 @@ void* vehicle_create_callback_addr = vehicle_create_callback;
 void MainHook()
 {
     InterceptCall(0xDB2142, vehicle_construct_og, vehicle_construct);
-    InterceptCall(0x9551F0, sub_9551F0, late_init);
+    InterceptCall(0x5202A2, sub_9551F0, late_init);
     InterceptCall(0xAA4FD6, object_free_this_addr, object_free_this_hook);
     InterceptCall(0xAA4FF7, object_free_this_addr, object_free_this_hook);
 
-    Patch<void*>((0xAE2B0B + 1), &vehicle_create_callback);
+    Patch<void*>((0xAE2B0B + 1), &vehicle_create_callback_addr);
 }
 
 
