@@ -1,0 +1,81 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Source Files\include">
+      <UniqueIdentifier>{ee8525a0-7085-4e94-95e0-53c45699f1a5}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\include\safetyhook">
+      <UniqueIdentifier>{3f954dd5-2299-443d-a2e4-18ff6a2db143}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\include\fmod">
+      <UniqueIdentifier>{d5a69067-485c-4830-a43b-e9d8225acab8}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="framework.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="pch.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\safetyhook\safetyhook.hpp">
+      <Filter>Source Files\include\safetyhook</Filter>
+    </ClInclude>
+    <ClInclude Include="include\safetyhook\Zydis.h">
+      <Filter>Source Files\include\safetyhook</Filter>
+    </ClInclude>
+    <ClInclude Include="include\safetyhook\MemoryMgr.h">
+      <Filter>Source Files\include</Filter>
+    </ClInclude>
+    <ClInclude Include="include\fmod\fmod.h">
+      <Filter>Source Files\include\fmod</Filter>
+    </ClInclude>
+    <ClInclude Include="include\fmod\fmod.hpp">
+      <Filter>Source Files\include\fmod</Filter>
+    </ClInclude>
+    <ClInclude Include="include\fmod\fmod_codec.h">
+      <Filter>Source Files\include\fmod</Filter>
+    </ClInclude>
+    <ClInclude Include="include\fmod\fmod_common.h">
+      <Filter>Source Files\include\fmod</Filter>
+    </ClInclude>
+    <ClInclude Include="include\fmod\fmod_dsp.h">
+      <Filter>Source Files\include\fmod</Filter>
+    </ClInclude>
+    <ClInclude Include="include\fmod\fmod_dsp_effects.h">
+      <Filter>Source Files\include\fmod</Filter>
+    </ClInclude>
+    <ClInclude Include="include\fmod\fmod_errors.h">
+      <Filter>Source Files\include\fmod</Filter>
+    </ClInclude>
+    <ClInclude Include="include\fmod\fmod_output.h">
+      <Filter>Source Files\include\fmod</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="dllmain.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="pch.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="include\safetyhook\safetyhook.cpp">
+      <Filter>Source Files\include\safetyhook</Filter>
+    </ClCompile>
+    <ClCompile Include="include\safetyhook\Zydis.c">
+      <Filter>Source Files\include\safetyhook</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>
