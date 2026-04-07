@@ -78,6 +78,9 @@ hud_message_params Hud_message_CSelfRadio_params =
 };
 
 class CSelfRadio;
+
+CSelfRadio* Ambient_CSelfRadio;
+
 constexpr char kSelfRadioMenuPath[] = "Self Radio";
 
 struct SelfRadioSong
@@ -409,6 +412,19 @@ FMOD_VECTOR object_get_pos(uintptr_t obj)
     }
     return pos;
 }
+
+FMOD_VECTOR ambient_get_pos(uintptr_t obj)
+{
+    FMOD_VECTOR pos{};
+    if (obj)
+    {
+        pos.x = *(float*)(obj + 0x8);
+        pos.y = *(float*)(obj + 0x10);
+        pos.z = *(float*)(obj + 0xC);
+    }
+    return pos;
+}
+
 
 FMOD_VECTOR player_get_pos() {
     FMOD_VECTOR playerPos = {
@@ -856,9 +872,32 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
         self_radio_start_playback(vehicle, csr, radioi);
 }
 
+void Update_Ambient_CSelfRadio() {
+    if (!Ambient_CSelfRadio)
+        return;
+    uintptr_t ambient = *(uintptr_t*)0x2574358;
+    uintptr_t emitter = *(uintptr_t*)0x257435C;
+    if (!emitter || !ambient) {
+        Ambient_CSelfRadio->Reset(true)
+;        return;
+    }
+
+    FMOD_VECTOR crib_radio_pos = ambient_get_pos(ambient);
+    //printf("%f %f %f\n", crib_radio_pos.x, crib_radio_pos.y, crib_radio_pos.z);
+    radio_inst* radio = *(radio_inst**)(emitter + 0x8);
+    if (!radio) {
+        Ambient_CSelfRadio->Reset(true);
+        return;
+    }
+
+
+
+}
+
 void gameplay_loop()
 {
     cdecl_call(sub_935B80);
+    Update_Ambient_CSelfRadio();
     g_cached_game_volume = get_game_volume();
 
     for (CSelfRadio* csr : g_self_radios)
@@ -919,7 +958,6 @@ void radio_tuner_update_hook(uintptr_t vehicle)
     self_radio_update(csr, switched_to_self_radio);
 
     csr->user_lpf = vehicle_audio_find_lpf_level(vehicle, 4, 1);
-    printf("user lpf %f\n", csr->user_lpf);
 
 
 }
@@ -990,7 +1028,10 @@ void BlingMenuOptions() {
 void late_init()
 {
     cdecl_call(sub_9551F0);
+    Ambient_CSelfRadio = new CSelfRadio();
+    self_radio_register(Ambient_CSelfRadio);
     self_radio_init();
+
     BlingMenuOptions();
 
     self_radio_Station = thiscall_call<int>(0x4904F0, "SELF RADIO");
