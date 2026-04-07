@@ -18,6 +18,65 @@ namespace fs = std::filesystem;
 constexpr uint64_t kSelfRadioInitialStartDelayMs = 1500;
 
 HMODULE g_dll_module = nullptr;
+
+enum hud_message_region : __int32
+{
+    HUD_REGION_DEBUG = 0x0,
+    HUD_REGION_HELP = 0x1,
+    HUD_REGION_DIVERSION = 0x2,
+    HUD_REGION_SUBTITLES = 0x3,
+    HUD_REGION_CUTSCENE_HELP = 0x4,
+    NUM_HUD_REGIONS = 0x5,
+    HUD_REGION_DEFAULT = 0x1,
+};
+
+
+enum hud_message_priority : __int32
+{
+    HUD_MESSAGE_PRIORITY_LOW = 0x0,
+    HUD_MESSAGE_PRIORITY_NORMAL = 0x1,
+    HUD_MESSAGE_PRIORITY_HIGH = 0x2,
+    HUD_MESSAGE_PRIORITY_CRITICAL = 0x3,
+    HUD_MESSAGE_PRIORITY_SUPER_CRITICAL = 0x4,
+};
+
+enum game_audio_type : __int32
+{
+    GAT_ALL = 0xFFFFFFFF,
+    GAT_FOLEY = 0x0,
+    GAT_VOICE = 0x1,
+    GAT_MUSIC = 0x2,
+    GAT_AMBIENT = 0x3,
+    NUM_GAME_AUDIO_TYPES = 0x4,
+};
+
+enum hud_message_sync_flags : __int32
+{
+    HUD_MESSAGE_SYNC_LOCAL = 0x1,
+    HUD_MESSAGE_SYNC_REMOTE = 0x2,
+    HUD_MESSAGE_SYNC_ALL = 0x3,
+};
+
+struct hud_message_params
+{
+    float duration;
+    float delay;
+    float repeat_delay;
+    float fade_time;
+    hud_message_priority priority;
+    hud_message_region region;
+    unsigned int group_id;
+    bool sound;
+    unsigned __int16 audio_id;
+    game_audio_type audio_type;
+    hud_message_sync_flags sync_flags;
+};
+
+hud_message_params Hud_message_CSelfRadio_params =
+{
+    7.f,0.f,0.f,2.4f,HUD_MESSAGE_PRIORITY_NORMAL,HUD_REGION_DIVERSION,0,false,-1,GAT_MUSIC,HUD_MESSAGE_SYNC_LOCAL
+};
+
 class CSelfRadio;
 constexpr char kSelfRadioMenuPath[] = "Self Radio";
 
