@@ -451,7 +451,7 @@ public:
     // atm if 2D, this usually means player can control the track, skip and so on.
     bool isPlayerControlled()
     {
-        return flags.is_2d && flags.object_alive;
+        return (flags.is_2d && flags.object_alive) || flags.is_ambient;
     }
 
     uint32_t vehicle_handle = 0;
