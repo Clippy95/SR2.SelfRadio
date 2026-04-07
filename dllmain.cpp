@@ -12,6 +12,7 @@
 #include <shobjidl.h>
 #include <safetyhook.hpp>
 #include "BlingMenu_public.h"
+#include "buildnumber.h"
 namespace fs = std::filesystem;
 
 constexpr uint64_t kSelfRadioInitialStartDelayMs = 1500;
@@ -919,6 +920,9 @@ void BlingMenuOptions() {
             std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", g_debug_listener_vx, g_debug_listener_vy, g_debug_listener_vz);
             return buffer;
         }, []() {});
+
+        BlingMenuAddFunc(kSelfRadioMenuPath, "version r" BUILD_NUMBER_STR, NULL);
+
     }
 }
 

@@ -108,6 +108,11 @@
 )
 </Command>
     </PostBuildEvent>
+    <PreBuildEvent>
+      <Command>pushd "$(SolutionDir)include\extra"
+call "$(SolutionDir)include\extra\gitrev.bat"
+popd</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
@@ -137,6 +142,11 @@
 )
 </Command>
     </PostBuildEvent>
+    <PreBuildEvent>
+      <Command>pushd "$(SolutionDir)include\extra"
+call "$(SolutionDir)include\extra\gitrev.bat"
+popd</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -164,6 +174,11 @@
 )
 </Command>
     </PostBuildEvent>
+    <PreBuildEvent>
+      <Command>pushd "$(SolutionDir)include\extra"
+call "$(SolutionDir)include\extra\gitrev.bat"
+popd</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -193,6 +208,11 @@
 )
 </Command>
     </PostBuildEvent>
+    <PreBuildEvent>
+      <Command>pushd "$(SolutionDir)include\extra"
+call "$(SolutionDir)include\extra\gitrev.bat"
+popd</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="BlingMenu_public.h" />
