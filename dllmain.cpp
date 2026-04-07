@@ -443,7 +443,9 @@ public:
         uint8_t is_2d : 1;
         uint8_t pending_start : 1;
         uint8_t pending_stop : 1;
-        uint8_t reserved : 3;
+        // idk if this is needed
+        uint8_t is_ambient : 1;
+        uint8_t reserved : 2;
     } flags{};
 
     // atm if 2D, this usually means player can control the track, skip and so on.
@@ -479,7 +481,14 @@ public:
             channel->stop();
         }
 
+        bool was_ambient = flags.is_ambient;
+
         flags = {};
+
+        if (was_ambient) {
+            flags.is_ambient = 1;
+        }
+
         vehicle_handle = 0;
         current_track_index = -1;
         playback_seed = 0;
@@ -1029,6 +1038,7 @@ void late_init()
 {
     cdecl_call(sub_9551F0);
     Ambient_CSelfRadio = new CSelfRadio();
+    Ambient_CSelfRadio->flags.is_ambient = 1;
     self_radio_register(Ambient_CSelfRadio);
     self_radio_init();
 
