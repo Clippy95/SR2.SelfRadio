@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -17,6 +18,7 @@ constexpr uint64_t kSelfRadioInitialStartDelayMs = 1500;
 
 HMODULE g_dll_module = nullptr;
 class CSelfRadio;
+constexpr char kSelfRadioMenuPath[] = "Self Radio";
 
 struct SelfRadioSong
 {
@@ -196,6 +198,7 @@ private:
             return false;
         }
 
+        system->set3DSettings(1.0f, 1.0f, 1.0f);
         m_system = system;
         return true;
     }
@@ -266,6 +269,33 @@ private:
 
 SelfRadioSongLibrary g_self_radio_song_library;
 std::vector<CSelfRadio*> g_self_radios;
+bool g_self_radio_enable_3d = true;
+bool g_self_radio_force_2d = false;
+bool g_self_radio_force_3d = false;
+bool g_self_radio_use_velocity = false;
+bool g_self_radio_use_linear_rolloff = false;
+float g_self_radio_min_distance = 2.0f;
+float g_self_radio_max_distance = 45.0f;
+float g_self_radio_3d_level = 1.0f;
+float g_self_radio_3d_spread = 0.0f;
+float g_self_radio_doppler_scale = 0.0f;
+float g_self_radio_rolloff_scale = 1.0f;
+uintptr_t g_debug_active_vehicle = 0;
+bool g_debug_active_playing = false;
+bool g_debug_active_is_2d = true;
+int g_debug_active_track = -1;
+float g_debug_emitter_x = 0.0f;
+float g_debug_emitter_y = 0.0f;
+float g_debug_emitter_z = 0.0f;
+float g_debug_emitter_vx = 0.0f;
+float g_debug_emitter_vy = 0.0f;
+float g_debug_emitter_vz = 0.0f;
+float g_debug_listener_x = 0.0f;
+float g_debug_listener_y = 0.0f;
+float g_debug_listener_z = 0.0f;
+float g_debug_listener_vx = 0.0f;
+float g_debug_listener_vy = 0.0f;
+float g_debug_listener_vz = 0.0f;
 
 bool self_radio_init()
 {
@@ -340,6 +370,12 @@ public:
         uint8_t reserved : 3;
     } flags{};
 
+    // atm if 2D, this usually means player can control the track, skip and so on.
+    bool isPlayerControlled()
+    {
+        return flags.is_2d && flags.object_alive;
+    }
+
     uint32_t vehicle_handle = 0;
 
     int current_track_index = -1;
@@ -349,12 +385,14 @@ public:
     uint64_t track_started_at_ms = 0; // when current track began
     uint32_t seek_ms = 0;             // current seek position if resumed
     uintptr_t object = 0;
+    uint64_t last_runtime_update_ms = 0;
 
     float volume_scale = 1.0f;        // final effective scalar you send to FMOD
     float user_lpf = 0.0f;            // if you want to mirror muffling/submersion
 
     FMOD_VECTOR object_pos{};
     FMOD_VECTOR object_vel{};
+    FMOD_VECTOR previous_object_pos{};
 
     FMOD::Channel* channel = nullptr;
     FMOD::Sound* current_sound = nullptr;
@@ -373,10 +411,12 @@ public:
         track_started_at_ms = 0;
         seek_ms = 0;
         object = 0;
+        last_runtime_update_ms = 0;
         volume_scale = 1.0f;
         user_lpf = 0.0f;
         object_pos = {};
         object_vel = {};
+        previous_object_pos = {};
         channel = nullptr;
         current_sound = nullptr;
     }
@@ -491,6 +531,30 @@ int radio_tuner_should_be_2d_for_vehicle(uintptr_t vehicle) {
     }
     return result;
 }
+
+double __declspec(naked) vehicle_audio_find_lpf_level(uintptr_t vehicle, int type_audio, int object_is_in_vehicle) {
+    static const DWORD vehicle_audio_find_lpf_level_addr = 0x483B00;
+    __asm {
+        push ebp
+        mov ebp, esp
+        sub esp, __LOCAL_SIZE
+        
+        push eax
+
+        mov eax, type_audio
+        push object_is_in_vehicle
+        push vehicle
+
+        call vehicle_audio_find_lpf_level_addr
+
+        pop eax
+
+        mov esp, ebp
+        pop ebp
+        ret
+    }
+}
+
 bool* game_focus = (bool*)0x252A406;
 float g_cached_game_volume = 0.0f;
 float get_game_volume()
@@ -503,14 +567,72 @@ float get_game_volume()
     return gameMusicVol;
 
 }
+
+static FMOD_VECTOR fmod_vector_sub(const FMOD_VECTOR& lhs, const FMOD_VECTOR& rhs)
+{
+    FMOD_VECTOR result{};
+    result.x = lhs.x - rhs.x;
+    result.y = lhs.y - rhs.y;
+    result.z = lhs.z - rhs.z;
+    return result;
+}
+
+static FMOD_VECTOR fmod_vector_scale(const FMOD_VECTOR& value, float scalar)
+{
+    FMOD_VECTOR result{};
+    result.x = value.x * scalar;
+    result.y = value.y * scalar;
+    result.z = value.z * scalar;
+    return result;
+}
+
+static void self_radio_update_debug_from_csr(const CSelfRadio* csr)
+{
+    if (!csr)
+        return;
+
+    g_debug_active_vehicle = csr->object;
+    g_debug_active_playing = csr->flags.is_playing != 0;
+    g_debug_active_is_2d = csr->flags.is_2d != 0;
+    g_debug_active_track = csr->current_track_index;
+    g_debug_emitter_x = csr->object_pos.x;
+    g_debug_emitter_y = csr->object_pos.y;
+    g_debug_emitter_z = csr->object_pos.z;
+    g_debug_emitter_vx = csr->object_vel.x;
+    g_debug_emitter_vy = csr->object_vel.y;
+    g_debug_emitter_vz = csr->object_vel.z;
+}
+
 uintptr_t sub_935B80;
 void self_radio_refresh_runtime_state(uintptr_t vehicle, CSelfRadio* csr)
 {
     if (!csr)
         return;
 
-    csr->flags.is_2d = radio_tuner_should_be_2d_for_vehicle(vehicle) != 0;
-    csr->object_pos = object_get_pos(vehicle);
+    const uint64_t now_ms = self_radio_now_ms();
+    const FMOD_VECTOR new_pos = object_get_pos(vehicle);
+    if (g_self_radio_use_velocity && csr->last_runtime_update_ms != 0 && now_ms > csr->last_runtime_update_ms)
+    {
+        const float delta_seconds = static_cast<float>(now_ms - csr->last_runtime_update_ms) / 1000.0f;
+        if (delta_seconds > 0.0f)
+            csr->object_vel = fmod_vector_scale(fmod_vector_sub(new_pos, csr->previous_object_pos), 1.0f / delta_seconds);
+    }
+    else
+    {
+        csr->object_vel = {};
+    }
+
+    csr->object_pos = new_pos;
+    csr->previous_object_pos = new_pos;
+    csr->last_runtime_update_ms = now_ms;
+
+    bool is_2d = radio_tuner_should_be_2d_for_vehicle(vehicle) != 0;
+    if (!g_self_radio_enable_3d || g_self_radio_force_2d)
+        is_2d = true;
+    else if (g_self_radio_force_3d)
+        is_2d = false;
+
+    csr->flags.is_2d = is_2d;
     csr->volume_scale = 1.0f;
 }
 
@@ -541,9 +663,11 @@ bool self_radio_start_playback(uintptr_t vehicle, CSelfRadio* csr, radio_inst* r
     }
     else
     {
-        channel->setMode(FMOD_3D);
+        channel->setMode(FMOD_3D | (g_self_radio_use_linear_rolloff ? FMOD_3D_LINEARROLLOFF : FMOD_3D_INVERSEROLLOFF));
+        channel->set3DLevel(g_self_radio_3d_level);
+        channel->set3DSpread(g_self_radio_3d_spread);
         channel->set3DAttributes(&csr->object_pos, &csr->object_vel);
-        channel->set3DMinMaxDistance(2.0f, 45.0f);
+        channel->set3DMinMaxDistance(g_self_radio_min_distance, g_self_radio_max_distance);
     }
 
     channel->setVolume(g_cached_game_volume);
@@ -582,6 +706,8 @@ void self_radio_stop_playback(CSelfRadio* csr, bool preserve_seek = false)
     csr->flags.is_playing = 0;
     csr->flags.pending_start = 0;
     csr->flags.pending_stop = 0;
+    if (g_debug_active_vehicle == csr->object)
+        g_debug_active_playing = false;
 
     if (!preserve_seek)
         csr->seek_ms = 0;
@@ -616,6 +742,7 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
 
     // This is per-vehicle, per-update state, not one-time start state.
     self_radio_refresh_runtime_state(vehicle, csr);
+    self_radio_update_debug_from_csr(csr);
 
     if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
         csr->current_track_index = static_cast<int>(csr->playback_seed % songs.size());
@@ -646,8 +773,11 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
         }
         else
         {
-            csr->channel->setMode(FMOD_3D);
+            csr->channel->setMode(FMOD_3D | (g_self_radio_use_linear_rolloff ? FMOD_3D_LINEARROLLOFF : FMOD_3D_INVERSEROLLOFF));
+            csr->channel->set3DLevel(g_self_radio_3d_level);
+            csr->channel->set3DSpread(g_self_radio_3d_spread);
             csr->channel->set3DAttributes(&csr->object_pos, &csr->object_vel);
+            csr->channel->set3DMinMaxDistance(g_self_radio_min_distance, g_self_radio_max_distance);
         }
 
         unsigned int position_ms = 0;
@@ -680,7 +810,34 @@ void gameplay_loop()
     }
 
     if (auto* system = g_self_radio_song_library.GetSystem())
+    {
+        static FMOD_VECTOR last_listener_pos{};
+        static uint64_t last_listener_update_ms = 0;
+        const uint64_t now_ms = self_radio_now_ms();
+        const FMOD_VECTOR listener_pos = player_get_pos();
+        FMOD_VECTOR listener_vel{};
+        if (g_self_radio_use_velocity && last_listener_update_ms != 0 && now_ms > last_listener_update_ms)
+        {
+            const float delta_seconds = static_cast<float>(now_ms - last_listener_update_ms) / 1000.0f;
+            if (delta_seconds > 0.0f)
+                listener_vel = fmod_vector_scale(fmod_vector_sub(listener_pos, last_listener_pos), 1.0f / delta_seconds);
+        }
+
+        float* matrix = (float*)0x025F5B38;
+        FMOD_VECTOR listener_forward = { matrix[6], matrix[7], matrix[8] };
+        FMOD_VECTOR listener_up = { matrix[3], matrix[4], matrix[5] };
+        system->set3DSettings(g_self_radio_doppler_scale, 1.0f, g_self_radio_rolloff_scale);
+        system->set3DListenerAttributes(0, &listener_pos, &listener_vel, &listener_forward, &listener_up);
+        g_debug_listener_x = listener_pos.x;
+        g_debug_listener_y = listener_pos.y;
+        g_debug_listener_z = listener_pos.z;
+        g_debug_listener_vx = listener_vel.x;
+        g_debug_listener_vy = listener_vel.y;
+        g_debug_listener_vz = listener_vel.z;
+        last_listener_pos = listener_pos;
+        last_listener_update_ms = now_ms;
         system->update();
+    }
 }
 
 void radio_tuner_update_hook(uintptr_t vehicle) 
@@ -701,13 +858,67 @@ void radio_tuner_update_hook(uintptr_t vehicle)
 
     self_radio_update(csr, switched_to_self_radio);
 
+    csr->user_lpf = vehicle_audio_find_lpf_level(vehicle, 4, 1);
+    printf("user lpf %f\n", csr->user_lpf);
+
+
 }
 
 uintptr_t sub_9551F0;
 
 void BlingMenuOptions() {
     if (BlingMenuLoad()) {
-        
+        BlingMenuAddCategory(kSelfRadioMenuPath);
+        BlingMenuAddBool(kSelfRadioMenuPath, "Enable 3D", &g_self_radio_enable_3d, nullptr);
+        BlingMenuAddBool(kSelfRadioMenuPath, "Force 2D", &g_self_radio_force_2d, nullptr);
+        BlingMenuAddBool(kSelfRadioMenuPath, "Force 3D", &g_self_radio_force_3d, nullptr);
+        BlingMenuAddBool(kSelfRadioMenuPath, "Use Velocity", &g_self_radio_use_velocity, nullptr);
+        BlingMenuAddBool(kSelfRadioMenuPath, "Linear Rolloff", &g_self_radio_use_linear_rolloff, nullptr);
+        BlingMenuAddFloat(kSelfRadioMenuPath, "3D Min Distance", &g_self_radio_min_distance, nullptr, 0.5f, 0.0f, 200.0f);
+        BlingMenuAddFloat(kSelfRadioMenuPath, "3D Max Distance", &g_self_radio_max_distance, nullptr, 1.0f, 1.0f, 1000.0f);
+        BlingMenuAddFloat(kSelfRadioMenuPath, "3D Level", &g_self_radio_3d_level, nullptr, 0.05f, 0.0f, 1.0f);
+        BlingMenuAddFloat(kSelfRadioMenuPath, "3D Spread", &g_self_radio_3d_spread, nullptr, 1.0f, 0.0f, 360.0f);
+        BlingMenuAddFloat(kSelfRadioMenuPath, "Doppler Scale", &g_self_radio_doppler_scale, nullptr, 0.05f, 0.0f, 5.0f);
+        BlingMenuAddFloat(kSelfRadioMenuPath, "Rolloff Scale", &g_self_radio_rolloff_scale, nullptr, 0.05f, 0.0f, 5.0f);
+        BlingMenuAddFuncStd(kSelfRadioMenuPath, "Reload Songs", []() {
+            self_radio_reload_songs();
+        });
+        BlingMenuAddFuncStd(kSelfRadioMenuPath, "Print Debug", []() {
+            printf("[SelfRadio] active_vehicle=%p playing=%d is_2d=%d track=%d\n",
+                (void*)g_debug_active_vehicle, g_debug_active_playing, g_debug_active_is_2d, g_debug_active_track);
+            printf("[SelfRadio] emitter_pos=(%.2f, %.2f, %.2f) emitter_vel=(%.2f, %.2f, %.2f)\n",
+                g_debug_emitter_x, g_debug_emitter_y, g_debug_emitter_z,
+                g_debug_emitter_vx, g_debug_emitter_vy, g_debug_emitter_vz);
+            printf("[SelfRadio] listener_pos=(%.2f, %.2f, %.2f) listener_vel=(%.2f, %.2f, %.2f)\n",
+                g_debug_listener_x, g_debug_listener_y, g_debug_listener_z,
+                g_debug_listener_vx, g_debug_listener_vy, g_debug_listener_vz);
+        });
+        BlingMenuAddFuncCustomStd(kSelfRadioMenuPath, "Status", [](int) -> const char* {
+            static char buffer[256];
+            std::snprintf(buffer, sizeof(buffer), "veh=%p playing=%d 2d=%d track=%d",
+                (void*)g_debug_active_vehicle, g_debug_active_playing, g_debug_active_is_2d, g_debug_active_track);
+            return buffer;
+        }, []() {});
+        BlingMenuAddFuncCustomStd(kSelfRadioMenuPath, "Emitter Pos", [](int) -> const char* {
+            static char buffer[256];
+            std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", g_debug_emitter_x, g_debug_emitter_y, g_debug_emitter_z);
+            return buffer;
+        }, []() {});
+        BlingMenuAddFuncCustomStd(kSelfRadioMenuPath, "Emitter Vel", [](int) -> const char* {
+            static char buffer[256];
+            std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", g_debug_emitter_vx, g_debug_emitter_vy, g_debug_emitter_vz);
+            return buffer;
+        }, []() {});
+        BlingMenuAddFuncCustomStd(kSelfRadioMenuPath, "Listener Pos", [](int) -> const char* {
+            static char buffer[256];
+            std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", g_debug_listener_x, g_debug_listener_y, g_debug_listener_z);
+            return buffer;
+        }, []() {});
+        BlingMenuAddFuncCustomStd(kSelfRadioMenuPath, "Listener Vel", [](int) -> const char* {
+            static char buffer[256];
+            std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", g_debug_listener_vx, g_debug_listener_vy, g_debug_listener_vz);
+            return buffer;
+        }, []() {});
     }
 }
 
@@ -715,6 +926,7 @@ void late_init()
 {
     cdecl_call(sub_9551F0);
     self_radio_init();
+    BlingMenuOptions();
 
     self_radio_Station = thiscall_call<int>(0x4904F0, "SELF RADIO");
     printf("SELF RAIDO1!! %d\n\n\n\n\n\n\n\n\n\n\n\n\n\n", self_radio_Station);
@@ -722,13 +934,23 @@ void late_init()
 
 uintptr_t object_free_this_addr;
 SafetyHookInline vehicle_free_thisD;
-
-void __fastcall object_free_this_hook(uintptr_t obj) {
+SafetyHookInline vehicle_delete_thisD;
+void FreeCSRadio(uintptr_t obj) 
+{
     auto CSRadio = vehicle_get_selfradio(obj);
     if (CSRadio) {
         CSRadio->Reset(true);
         CSRadio->flags.object_alive = 0;
     }
+}
+
+void __fastcall object_delete_this_hook(uintptr_t obj, void*, int unknown) {
+    FreeCSRadio(obj);
+    vehicle_delete_thisD.unsafe_thiscall(obj,unknown);
+}
+
+void __fastcall object_free_this_hook(uintptr_t obj) {
+    FreeCSRadio(obj);
     vehicle_free_thisD.unsafe_thiscall(obj);
 }
 
@@ -762,6 +984,11 @@ void MainHook()
     //InterceptCall(0xAA4FF7, object_free_this_addr, object_free_this_hook);
 
     vehicle_free_thisD = safetyhook::create_inline(0xAA4A40, object_free_this_hook);
+    vehicle_delete_thisD = safetyhook::create_inline(0xAA4490, object_delete_this_hook);
+
+    static auto vehicle_kill_audio_hook = safetyhook::create_mid(0x483570, [](SafetyHookContext& ctx) {
+        FreeCSRadio(ctx.eax);
+        });
 
     InterceptCall(0x5205FB, sub_935B80, gameplay_loop);
 
