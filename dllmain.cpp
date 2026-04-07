@@ -922,6 +922,8 @@ void BlingMenuOptions() {
         }, []() {});
 
         BlingMenuAddFunc(kSelfRadioMenuPath, "version r" BUILD_NUMBER_STR, NULL);
+        BlingMenuAddFunc(kSelfRadioMenuPath, "commit " COMMIT_HASH, NULL);
+        BlingMenuAddFunc(kSelfRadioMenuPath, BUILD_TIME_UTC, NULL);
 
     }
 }
