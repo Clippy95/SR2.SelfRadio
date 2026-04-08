@@ -75,8 +75,52 @@ struct hud_message_params
 
 hud_message_params Hud_message_CSelfRadio_params =
 {
-    7.f,0.f,0.f,2.4f,HUD_MESSAGE_PRIORITY_NORMAL,HUD_REGION_DIVERSION,0,false,-1,GAT_MUSIC,HUD_MESSAGE_SYNC_LOCAL
+    2.4f,0.f,0.f,0.4f,HUD_MESSAGE_PRIORITY_NORMAL,HUD_REGION_DIVERSION,0,false,-1,GAT_MUSIC,HUD_MESSAGE_SYNC_LOCAL
 };
+
+int __declspec(naked) hud_message_asm(const wchar_t* message_text, hud_message_params* a2) {
+    __asm {
+        push ebp
+        mov ebp, esp
+        sub esp, __LOCAL_SIZE
+
+
+        mov eax, message_text
+        push eax
+        mov edi, a2
+        push edi
+
+        mov edx, 0x0079CD40
+        call edx
+
+        mov esp, ebp
+        pop ebp
+        ret
+    }
+}
+
+void hud_message(const wchar_t* message_text, hud_message_params* params)
+{
+    __asm pushad
+    hud_message_asm(message_text, params);
+    __asm popad
+}
+
+static void self_radio_notify_track(const std::string& name)
+{
+    static std::string last_notified;
+    if (name == last_notified)
+        return;
+    last_notified = name;
+
+    static wchar_t wide_buf[256];
+    std::wstring wide = L"Self Radio now playing: ";
+    wide += std::wstring(name.begin(), name.end());
+    wcsncpy(wide_buf, wide.c_str(), 255);
+    wide_buf[255] = L'\0';
+
+    hud_message(wide_buf, &Hud_message_CSelfRadio_params);
+}
 
 class CSelfRadio;
 
@@ -818,6 +862,7 @@ bool self_radio_start_playback(uintptr_t vehicle, CSelfRadio* csr, radio_inst* r
     csr->flags.is_playing = 1;
     csr->flags.pending_start = 0;
     csr->flags.pending_stop = 0;
+    self_radio_notify_track(song.name);
     return true;
 }
 
@@ -862,6 +907,7 @@ bool self_radio_start_playback_ambient(CSelfRadio* csr, const FMOD_VECTOR& world
     csr->flags.is_2d = 0; // ambient is always 3D
     csr->flags.pending_start = 0;
     csr->flags.pending_stop = 0;
+    self_radio_notify_track(song.name);
     return true;
 }
 
@@ -1303,7 +1349,7 @@ void BlingMenuOptions() {
                     std::snprintf(buffer, sizeof(buffer), "(%.2f, %.2f, %.2f)", g_debug_listener_vx, g_debug_listener_vy, g_debug_listener_vz);
                     return buffer;
                     }, []() {});
-
+                BlingMenuAddInt(kSelfRadioMenuPath, "Hud_message_CSelfRadio_params.region", (int*)&Hud_message_CSelfRadio_params.region, NULL, 1, HUD_REGION_DEBUG, NUM_HUD_REGIONS);
                 BlingMenuAddFunc(kSelfRadioMenuPath, "version r" BUILD_NUMBER_STR, NULL);
                 BlingMenuAddFunc(kSelfRadioMenuPath, "commit " COMMIT_HASH, NULL);
                 BlingMenuAddFunc(kSelfRadioMenuPath, BUILD_TIME_UTC, NULL);
