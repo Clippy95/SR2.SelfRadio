@@ -2,6 +2,7 @@
 #include "pch.h"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -379,6 +380,8 @@ bool g_self_radio_use_velocity = false;
 bool g_self_radio_use_linear_rolloff = false;
 float g_self_radio_min_distance = 2.0f;
 float g_self_radio_max_distance = 45.0f;
+float g_self_radio_vehicle_box_extent = 80.0f;
+float g_self_radio_ambient_box_extent = 100.0f;
 float g_self_radio_3d_level = 1.0f;
 float g_self_radio_3d_spread = 0.0f;
 float g_self_radio_doppler_scale = 0.0f;
@@ -784,6 +787,17 @@ static FMOD_VECTOR fmod_vector_scale(const FMOD_VECTOR& value, float scalar)
     result.y = value.y * scalar;
     result.z = value.z * scalar;
     return result;
+}
+
+static bool self_radio_is_within_listener_box(const FMOD_VECTOR& emitter_pos, float half_extent)
+{
+    if (half_extent <= 0.0f)
+        return true;
+
+    const FMOD_VECTOR listener_pos = player_get_pos();
+    return std::fabs(emitter_pos.x - listener_pos.x) <= half_extent
+        && std::fabs(emitter_pos.y - listener_pos.y) <= half_extent
+        && std::fabs(emitter_pos.z - listener_pos.z) <= half_extent;
 }
 
 static void self_radio_update_debug_from_csr(const CSelfRadio* csr)
@@ -1224,6 +1238,16 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
     self_radio_refresh_runtime_state(vehicle, csr);
     self_radio_update_debug_from_csr(csr);
 
+    const bool within_listener_box = csr->flags.is_2d || self_radio_is_within_listener_box(csr->object_pos, g_self_radio_vehicle_box_extent);
+    if (!within_listener_box)
+    {
+        if (csr->flags.is_playing || csr->channel)
+            self_radio_stop_playback(csr, true);
+        else
+            csr->flags.pending_start = 0;
+        return;
+    }
+
     if (g_self_radio_sync_all && g_self_radio_station.active)
         self_radio_station_apply_to(csr, now_ms);
     else
@@ -1420,6 +1444,17 @@ void Update_Ambient_CSelfRadio()
     csr.object_pos = world_pos;
     const uint64_t now_ms = self_radio_now_ms();
 
+    const bool ambient_is_2d = !g_self_radio_enable_3d || g_self_radio_force_2d;
+    const bool within_listener_box = ambient_is_2d || self_radio_is_within_listener_box(world_pos, g_self_radio_ambient_box_extent);
+    if (!within_listener_box)
+    {
+        if (csr.flags.is_playing || csr.channel)
+            ambient_csr_save_and_stop(csr);
+        else
+            csr.flags.pending_start = 0;
+        return;
+    }
+
     if (g_self_radio_sync_all && g_self_radio_station.active)
         self_radio_station_apply_to(&csr, now_ms);
     else
@@ -1595,6 +1630,8 @@ void BlingMenuOptions() {
         BlingMenuAddBool(kSelfRadioMenuPath, "Force 3D", &g_self_radio_force_3d, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Use Velocity", &g_self_radio_use_velocity, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Linear Rolloff", &g_self_radio_use_linear_rolloff, nullptr);
+        BlingMenuAddFloat(kSelfRadioMenuPath, "Vehicle Box Extent", &g_self_radio_vehicle_box_extent, nullptr, 1.0f, 0.0f, 500.0f);
+        BlingMenuAddFloat(kSelfRadioMenuPath, "Ambient Box Extent", &g_self_radio_ambient_box_extent, nullptr, 1.0f, 0.0f, 500.0f);
         BlingMenuAddFloat(kSelfRadioMenuPath, "3D Min Distance", &g_self_radio_min_distance, nullptr, 0.5f, 0.0f, 200.0f);
         BlingMenuAddFloat(kSelfRadioMenuPath, "3D Max Distance", &g_self_radio_max_distance, nullptr, 1.0f, 1.0f, 1000.0f);
         BlingMenuAddFloat(kSelfRadioMenuPath, "3D Level", &g_self_radio_3d_level, nullptr, 0.05f, 0.0f, 1.0f);
