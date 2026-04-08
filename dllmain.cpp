@@ -13,6 +13,7 @@
 #include <safetyhook.hpp>
 #include "BlingMenu_public.h"
 #include "buildnumber.h"
+#include <random>
 namespace fs = std::filesystem;
 
 constexpr uint64_t kSelfRadioInitialStartDelayMs = 1500;
@@ -436,6 +437,13 @@ FMOD_VECTOR player_get_pos() {
     return playerPos;
 }
 
+static uint32_t self_radio_random_seed()
+{
+    static std::mt19937 rng{ std::random_device{}() };
+    static std::uniform_int_distribution<uint32_t> dist;
+    return dist(rng);
+}
+
 class CSelfRadio {
 public:
     struct Flags {
@@ -456,7 +464,7 @@ public:
     uint32_t vehicle_handle = 0;
 
     int current_track_index = -1;
-    uint32_t playback_seed = 0;
+    uint32_t playback_seed = self_radio_random_seed();
 
     uint64_t start_at_ms = 0;
     uint64_t track_started_at_ms = 0;
@@ -584,7 +592,7 @@ uintptr_t __fastcall vehicle_construct(uintptr_t thisa) {
         auto test = new CSelfRadio();
         test->object = obj;
         test->flags.object_alive = 1;
-        test->playback_seed = static_cast<uint32_t>(obj);
+        test->playback_seed = self_radio_random_seed();
         self_radio_register(test);
         set_uint((uintptr_t)test, obj + 0x4A, obj + 0xA9);
     }
@@ -1289,7 +1297,7 @@ void vehicle_create_callback(uintptr_t obj)
     if (CSRadio) {
         CSRadio->flags.object_alive = 1;
         CSRadio->object = obj;
-        CSRadio->playback_seed = static_cast<uint32_t>(obj);
+        CSRadio->playback_seed = self_radio_random_seed();
         self_radio_register(CSRadio);
     }
 }
