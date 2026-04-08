@@ -76,7 +76,7 @@ struct hud_message_params
 
 hud_message_params Hud_message_CSelfRadio_params =
 {
-    2.4f,0.f,0.f,0.4f,HUD_MESSAGE_PRIORITY_NORMAL,HUD_REGION_DIVERSION,0,false,-1,GAT_MUSIC,HUD_MESSAGE_SYNC_LOCAL
+    2.4f,0.f,0.f,0.4f,HUD_MESSAGE_PRIORITY_NORMAL,HUD_REGION_DEBUG,0,false,-1,GAT_MUSIC,HUD_MESSAGE_SYNC_LOCAL
 };
 
 int __declspec(naked) hud_message_asm(const wchar_t* message_text, hud_message_params* a2) {
@@ -380,7 +380,7 @@ bool g_self_radio_use_velocity = false;
 bool g_self_radio_use_linear_rolloff = false;
 float g_self_radio_min_distance = 2.0f;
 float g_self_radio_max_distance = 45.0f;
-float g_self_radio_vehicle_box_extent = 80.0f;
+float g_self_radio_vehicle_box_extent = 44.0f;
 float g_self_radio_ambient_box_extent = 100.0f;
 float g_self_radio_3d_level = 1.0f;
 float g_self_radio_3d_spread = 0.0f;
