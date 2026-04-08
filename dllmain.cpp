@@ -132,7 +132,7 @@ struct SelfRadioSong
 {
     std::string name;
     fs::path path;
-    FMOD::Sound* sound = nullptr;
+    uint32_t length_ms = 0;
 };
 
 class SelfRadioSongLibrary
@@ -348,7 +348,10 @@ private:
             SelfRadioSong song{};
             song.name = MakeSongName(source_path);
             song.path = song_path;
-            song.sound = sound;
+            unsigned int length_ms = 0;
+            if (sound->getLength(&length_ms, FMOD_TIMEUNIT_MS) == FMOD_OK)
+                song.length_ms = length_ms;
+            sound->release();
             printf("[SelfRadio] Found song: %s (%s)\n", song.name.c_str(), song.path.string().c_str());
             m_songs.push_back(std::move(song));
         }
@@ -356,15 +359,6 @@ private:
 
     void ReleaseSongs()
     {
-        for (SelfRadioSong& song : m_songs)
-        {
-            if (song.sound)
-            {
-                song.sound->release();
-                song.sound = nullptr;
-            }
-        }
-
         m_songs.clear();
     }
 
@@ -378,6 +372,7 @@ private:
 SelfRadioSongLibrary g_self_radio_song_library;
 std::vector<CSelfRadio*> g_self_radios;
 bool g_self_radio_enable_3d = true;
+bool g_self_radio_sync_all = false;
 bool g_self_radio_force_2d = false;
 bool g_self_radio_force_3d = false;
 bool g_self_radio_use_velocity = false;
@@ -404,6 +399,19 @@ float g_debug_listener_z = 0.0f;
 float g_debug_listener_vx = 0.0f;
 float g_debug_listener_vy = 0.0f;
 float g_debug_listener_vz = 0.0f;
+
+struct SelfRadioStationState
+{
+    bool active = false;
+    bool pending_start = false;
+    int track_index = -1;
+    uint32_t seek_ms = 0;
+    uint64_t start_at_ms = 0;
+    uint64_t last_update_ms = 0;
+};
+
+SelfRadioStationState g_self_radio_station{};
+bool g_self_radio_sync_all_prev = false;
 
 bool self_radio_init()
 {
@@ -513,6 +521,7 @@ public:
     uint64_t start_at_ms = 0;
     uint64_t track_started_at_ms = 0;
     uint32_t seek_ms = 0;
+    bool synced_to_station = false;
     uintptr_t object = 0;
     uint64_t last_runtime_update_ms = 0;
 
@@ -531,6 +540,9 @@ public:
         if (stop_audio && channel) {
             channel->stop();
         }
+        if (current_sound) {
+            current_sound->release();
+        }
 
         bool was_ambient = flags.is_ambient;
 
@@ -546,6 +558,7 @@ public:
         start_at_ms = 0;
         track_started_at_ms = 0;
         seek_ms = 0;
+        synced_to_station = false;
         object = 0;
         last_runtime_update_ms = 0;
         volume_scale = 1.0f;
@@ -601,9 +614,14 @@ static void ambient_csr_save_and_stop(CSelfRadio& csr)
             csr.seek_ms = pos;
         csr.channel->stop();
         csr.channel = nullptr;
-        csr.current_sound = nullptr;
         csr.flags.is_playing = 0;
         csr.flags.pending_start = 0;
+    }
+
+    if (csr.current_sound)
+    {
+        csr.current_sound->release();
+        csr.current_sound = nullptr;
     }
 }
 
@@ -825,16 +843,25 @@ bool self_radio_start_playback(uintptr_t vehicle, CSelfRadio* csr, radio_inst* r
     if (!system || songs.empty() || !csr || !radioi)
         return false;
 
-    if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
+    if (g_self_radio_sync_all && g_self_radio_station.active && g_self_radio_station.track_index >= 0)
+    {
+        csr->current_track_index = g_self_radio_station.track_index;
+        csr->seek_ms = g_self_radio_station.pending_start ? 0 : g_self_radio_station.seek_ms;
+    }
+    else if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
         csr->current_track_index = static_cast<int>(csr->playback_seed % songs.size());
 
     const SelfRadioSong& song = songs[csr->current_track_index];
-    if (!song.sound)
+    FMOD::Sound* sound = nullptr;
+    if (system->createStream(song.path.string().c_str(), FMOD_CREATESTREAM | FMOD_LOOP_OFF, nullptr, &sound) != FMOD_OK || !sound)
         return false;
 
     FMOD::Channel* channel = nullptr;
-    if (system->playSound(song.sound, nullptr, true, &channel) != FMOD_OK || !channel)
+    if (system->playSound(sound, nullptr, true, &channel) != FMOD_OK || !channel)
+    {
+        sound->release();
         return false;
+    }
 
     self_radio_refresh_runtime_state(vehicle, csr);
 
@@ -857,12 +884,14 @@ bool self_radio_start_playback(uintptr_t vehicle, CSelfRadio* csr, radio_inst* r
     channel->setPaused(false);
 
     csr->channel = channel;
-    csr->current_sound = song.sound;
+    csr->current_sound = sound;
     csr->track_started_at_ms = self_radio_now_ms() - csr->seek_ms;
     csr->flags.is_playing = 1;
     csr->flags.pending_start = 0;
     csr->flags.pending_stop = 0;
-    self_radio_notify_track(song.name);
+    csr->synced_to_station = g_self_radio_sync_all && g_self_radio_station.active;
+    if (!g_self_radio_sync_all)
+        self_radio_notify_track(song.name);
     return true;
 }
 
@@ -874,16 +903,25 @@ bool self_radio_start_playback_ambient(CSelfRadio* csr, const FMOD_VECTOR& world
     if (!system || songs.empty() || !csr)
         return false;
 
-    if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
+    if (g_self_radio_sync_all && g_self_radio_station.active && g_self_radio_station.track_index >= 0)
+    {
+        csr->current_track_index = g_self_radio_station.track_index;
+        csr->seek_ms = g_self_radio_station.pending_start ? 0 : g_self_radio_station.seek_ms;
+    }
+    else if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
         csr->current_track_index = static_cast<int>(csr->playback_seed % songs.size());
 
     const SelfRadioSong& song = songs[csr->current_track_index];
-    if (!song.sound)
+    FMOD::Sound* sound = nullptr;
+    if (system->createStream(song.path.string().c_str(), FMOD_CREATESTREAM | FMOD_LOOP_OFF, nullptr, &sound) != FMOD_OK || !sound)
         return false;
 
     FMOD::Channel* channel = nullptr;
-    if (system->playSound(song.sound, nullptr, true, &channel) != FMOD_OK || !channel)
+    if (system->playSound(sound, nullptr, true, &channel) != FMOD_OK || !channel)
+    {
+        sound->release();
         return false;
+    }
 
     // Ambient crib radio is always 3D.
     const FMOD_VECTOR zero_vel{};
@@ -901,13 +939,15 @@ bool self_radio_start_playback_ambient(CSelfRadio* csr, const FMOD_VECTOR& world
     csr->object_pos = world_pos;
     csr->object_vel = zero_vel;
     csr->channel = channel;
-    csr->current_sound = song.sound;
+    csr->current_sound = sound;
     csr->track_started_at_ms = self_radio_now_ms() - csr->seek_ms;
     csr->flags.is_playing = 1;
     csr->flags.is_2d = 0; // ambient is always 3D
     csr->flags.pending_start = 0;
     csr->flags.pending_stop = 0;
-    self_radio_notify_track(song.name);
+    csr->synced_to_station = g_self_radio_sync_all && g_self_radio_station.active;
+    if (!g_self_radio_sync_all)
+        self_radio_notify_track(song.name);
     return true;
 }
 
@@ -929,7 +969,11 @@ void self_radio_stop_playback(CSelfRadio* csr, bool preserve_seek = false)
     }
 
     csr->channel = nullptr;
-    csr->current_sound = nullptr;
+    if (csr->current_sound)
+    {
+        csr->current_sound->release();
+        csr->current_sound = nullptr;
+    }
     csr->flags.is_playing = 0;
     csr->flags.pending_start = 0;
     csr->flags.pending_stop = 0;
@@ -938,6 +982,215 @@ void self_radio_stop_playback(CSelfRadio* csr, bool preserve_seek = false)
 
     if (!preserve_seek)
         csr->seek_ms = 0;
+}
+
+static uint32_t self_radio_get_track_length_ms(int track_index)
+{
+    const auto& songs = self_radio_get_songs();
+    if (track_index < 0 || track_index >= static_cast<int>(songs.size()))
+        return 0;
+
+    return songs[track_index].length_ms;
+}
+
+static bool self_radio_is_station_candidate(const CSelfRadio* csr)
+{
+    if (!csr)
+        return false;
+
+    if (csr->flags.is_ambient)
+        return (csr->flags.is_playing && csr->channel) || csr->flags.pending_start;
+
+    if (!csr->flags.object_alive || !csr->object)
+        return false;
+
+    radio_inst* radioi = vehicle_get_radio_inst(csr->object);
+    if (!radioi || !is_radio_station_self_radio(radioi))
+        return false;
+
+    return (csr->flags.is_playing && csr->channel) || csr->flags.pending_start;
+}
+
+static CSelfRadio* self_radio_find_station_source()
+{
+    CSelfRadio* preferred_2d = nullptr;
+    CSelfRadio* any_playing = nullptr;
+    CSelfRadio* any_pending = nullptr;
+
+    auto consider = [&](CSelfRadio* csr)
+        {
+            if (!self_radio_is_station_candidate(csr))
+                return;
+
+            if (csr->flags.is_playing && csr->channel)
+            {
+                if (csr->flags.is_2d && !preferred_2d)
+                    preferred_2d = csr;
+
+                if (!any_playing)
+                    any_playing = csr;
+            }
+            else if (!any_pending)
+            {
+                any_pending = csr;
+            }
+        };
+
+    for (CSelfRadio* csr : g_self_radios)
+        consider(csr);
+
+    for (auto& [ptr, csr] : g_ambient_states)
+        consider(&csr);
+
+    if (preferred_2d)
+        return preferred_2d;
+    if (any_playing)
+        return any_playing;
+    return any_pending;
+}
+
+static void self_radio_station_clear()
+{
+    g_self_radio_station = {};
+}
+
+static void self_radio_station_bootstrap_from(CSelfRadio* source)
+{
+    if (!source || source->current_track_index < 0)
+        return;
+
+    g_self_radio_station.active = true;
+    g_self_radio_station.track_index = source->current_track_index;
+    g_self_radio_station.seek_ms = source->seek_ms;
+    if (source->flags.is_playing && source->channel)
+    {
+        unsigned int live_pos_ms = 0;
+        if (source->channel->getPosition(&live_pos_ms, FMOD_TIMEUNIT_MS) == FMOD_OK)
+            g_self_radio_station.seek_ms = live_pos_ms;
+    }
+    g_self_radio_station.pending_start = !(source->flags.is_playing && source->channel) && source->flags.pending_start;
+    g_self_radio_station.start_at_ms = g_self_radio_station.pending_start ? source->start_at_ms : self_radio_now_ms();
+    g_self_radio_station.last_update_ms = self_radio_now_ms();
+
+    if (!g_self_radio_station.pending_start)
+    {
+        const auto& songs = self_radio_get_songs();
+        if (g_self_radio_station.track_index >= 0 && g_self_radio_station.track_index < static_cast<int>(songs.size()))
+            self_radio_notify_track(songs[g_self_radio_station.track_index].name);
+    }
+}
+
+static void self_radio_station_update()
+{
+    const uint64_t now_ms = self_radio_now_ms();
+    const bool paused = havok_paused();
+
+    if (!g_self_radio_sync_all)
+    {
+        self_radio_station_clear();
+        g_self_radio_sync_all_prev = false;
+        return;
+    }
+
+    if (!g_self_radio_sync_all_prev)
+    {
+        self_radio_station_clear();
+        if (CSelfRadio* source = self_radio_find_station_source())
+            self_radio_station_bootstrap_from(source);
+    }
+    else if (!g_self_radio_station.active)
+    {
+        if (CSelfRadio* source = self_radio_find_station_source())
+            self_radio_station_bootstrap_from(source);
+    }
+
+    g_self_radio_sync_all_prev = true;
+
+    if (!g_self_radio_station.active)
+        return;
+
+    if (g_self_radio_station.pending_start)
+    {
+        if (now_ms < g_self_radio_station.start_at_ms)
+            return;
+
+        g_self_radio_station.pending_start = false;
+        g_self_radio_station.seek_ms = 0;
+        g_self_radio_station.last_update_ms = now_ms;
+
+        const auto& songs = self_radio_get_songs();
+        if (g_self_radio_station.track_index >= 0 && g_self_radio_station.track_index < static_cast<int>(songs.size()))
+            self_radio_notify_track(songs[g_self_radio_station.track_index].name);
+        return;
+    }
+
+    if (paused)
+    {
+        g_self_radio_station.last_update_ms = now_ms;
+        return;
+    }
+
+    if (g_self_radio_station.last_update_ms == 0)
+        g_self_radio_station.last_update_ms = now_ms;
+
+    const uint64_t delta_ms = now_ms - g_self_radio_station.last_update_ms;
+    g_self_radio_station.last_update_ms = now_ms;
+    g_self_radio_station.seek_ms += static_cast<uint32_t>(delta_ms);
+
+    const auto& songs = self_radio_get_songs();
+    while (g_self_radio_station.active && !songs.empty())
+    {
+        const uint32_t length_ms = self_radio_get_track_length_ms(g_self_radio_station.track_index);
+        if (length_ms == 0 || g_self_radio_station.seek_ms < length_ms)
+            break;
+
+        g_self_radio_station.seek_ms -= length_ms;
+        g_self_radio_station.track_index = (g_self_radio_station.track_index + 1) % static_cast<int>(songs.size());
+        self_radio_notify_track(songs[g_self_radio_station.track_index].name);
+    }
+}
+
+static void self_radio_station_apply_to(CSelfRadio* csr, uint64_t now_ms)
+{
+    if (!g_self_radio_sync_all || !g_self_radio_station.active || !csr)
+        return;
+
+    if (g_self_radio_station.track_index < 0)
+        return;
+
+    if (g_self_radio_station.pending_start)
+    {
+        if (csr->channel)
+            self_radio_stop_playback(csr, false);
+
+        csr->current_track_index = g_self_radio_station.track_index;
+        csr->seek_ms = 0;
+        csr->flags.pending_start = 1;
+        csr->start_at_ms = g_self_radio_station.start_at_ms;
+        csr->synced_to_station = true;
+        return;
+    }
+
+    const int previous_track_index = csr->current_track_index;
+    csr->current_track_index = g_self_radio_station.track_index;
+    csr->seek_ms = g_self_radio_station.seek_ms;
+
+    if (csr->flags.is_playing && csr->channel)
+    {
+        if (!csr->synced_to_station || previous_track_index != g_self_radio_station.track_index)
+        {
+            self_radio_stop_playback(csr, false);
+            csr->flags.pending_start = 1;
+            csr->start_at_ms = now_ms;
+        }
+    }
+    else
+    {
+        csr->flags.pending_start = 1;
+        csr->start_at_ms = now_ms;
+    }
+
+    csr->synced_to_station = true;
 }
 
 void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
@@ -964,14 +1217,21 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
     {
         if (csr->flags.is_playing || csr->flags.pending_start)
             self_radio_stop_playback(csr, true);
+        csr->synced_to_station = false;
         return;
     }
 
     self_radio_refresh_runtime_state(vehicle, csr);
     self_radio_update_debug_from_csr(csr);
 
-    if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
+    if (g_self_radio_sync_all && g_self_radio_station.active)
+        self_radio_station_apply_to(csr, now_ms);
+    else
+    {
+        csr->synced_to_station = false;
+        if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
         csr->current_track_index = static_cast<int>(csr->playback_seed % songs.size());
+    }
 
     if (csr->channel)
     {
@@ -982,12 +1242,26 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
         if (!channel_playing)
         {
             csr->channel = nullptr;
-            csr->current_sound = nullptr;
+            if (csr->current_sound)
+            {
+                csr->current_sound->release();
+                csr->current_sound = nullptr;
+            }
             csr->flags.is_playing = 0;
-            csr->seek_ms = 0;
-            csr->current_track_index = (csr->current_track_index + 1) % static_cast<int>(songs.size());
-            csr->flags.pending_start = 1;
-            csr->start_at_ms = now_ms;
+            if (g_self_radio_sync_all && g_self_radio_station.active)
+            {
+                csr->seek_ms = g_self_radio_station.pending_start ? 0 : g_self_radio_station.seek_ms;
+                csr->current_track_index = g_self_radio_station.track_index;
+                csr->flags.pending_start = 1;
+                csr->start_at_ms = g_self_radio_station.pending_start ? g_self_radio_station.start_at_ms : now_ms;
+            }
+            else
+            {
+                csr->seek_ms = 0;
+                csr->current_track_index = (csr->current_track_index + 1) % static_cast<int>(songs.size());
+                csr->flags.pending_start = 1;
+                csr->start_at_ms = now_ms;
+            }
         }
     }
 
@@ -1015,8 +1289,13 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
     if (!csr->flags.pending_start)
     {
         csr->flags.pending_start = 1;
-        const bool apply_delay = switched_to_self_radio;
-        csr->start_at_ms = now_ms + (apply_delay ? kSelfRadioInitialStartDelayMs : 0);
+        if (g_self_radio_sync_all && g_self_radio_station.active)
+            csr->start_at_ms = g_self_radio_station.pending_start ? g_self_radio_station.start_at_ms : now_ms;
+        else
+        {
+            const bool apply_delay = switched_to_self_radio;
+            csr->start_at_ms = now_ms + (apply_delay ? kSelfRadioInitialStartDelayMs : 0);
+        }
     }
 
     if (csr->flags.pending_start && now_ms >= csr->start_at_ms)
@@ -1035,11 +1314,31 @@ void self_radio_skip_track(CSelfRadio* csr, int delta)
 
     const int n = static_cast<int>(songs.size());
 
+    if (g_self_radio_sync_all)
+    {
+        if (!g_self_radio_station.active)
+            self_radio_station_bootstrap_from(csr);
+
+        if (!g_self_radio_station.active)
+            return;
+
+        g_self_radio_station.track_index = ((g_self_radio_station.track_index + delta) % n + n) % n;
+        g_self_radio_station.seek_ms = 0;
+        g_self_radio_station.pending_start = false;
+        g_self_radio_station.last_update_ms = self_radio_now_ms();
+        self_radio_notify_track(songs[g_self_radio_station.track_index].name);
+        return;
+    }
+
     if (csr->channel)
     {
         csr->channel->stop();
         csr->channel = nullptr;
-        csr->current_sound = nullptr;
+        if (csr->current_sound)
+        {
+            csr->current_sound->release();
+            csr->current_sound = nullptr;
+        }
     }
 
     csr->flags.is_playing = 0;
@@ -1111,6 +1410,7 @@ void Update_Ambient_CSelfRadio()
     if (!is_self_station)
     {
         ambient_csr_save_and_stop(csr);
+        csr.synced_to_station = false;
         return;
     }
 
@@ -1118,6 +1418,20 @@ void Update_Ambient_CSelfRadio()
 
     const FMOD_VECTOR world_pos = ambient_get_pos(ambient);
     csr.object_pos = world_pos;
+    const uint64_t now_ms = self_radio_now_ms();
+
+    if (g_self_radio_sync_all && g_self_radio_station.active)
+        self_radio_station_apply_to(&csr, now_ms);
+    else
+    {
+        csr.synced_to_station = false;
+        if (csr.current_track_index < 0 ||
+            csr.current_track_index >= static_cast<int>(songs.size()))
+        {
+            csr.current_track_index =
+                static_cast<int>(csr.playback_seed % songs.size());
+        }
+    }
 
     if (csr.flags.is_playing && csr.channel)
     {
@@ -1145,15 +1459,29 @@ void Update_Ambient_CSelfRadio()
         if (!channel_playing)
         {
             csr.channel = nullptr;
-            csr.current_sound = nullptr;
+            if (csr.current_sound)
+            {
+                csr.current_sound->release();
+                csr.current_sound = nullptr;
+            }
             csr.flags.is_playing = 0;
-            csr.seek_ms = 0;
+            if (g_self_radio_sync_all && g_self_radio_station.active)
+            {
+                csr.seek_ms = g_self_radio_station.pending_start ? 0 : g_self_radio_station.seek_ms;
+                csr.current_track_index = g_self_radio_station.track_index;
+                csr.flags.pending_start = 1;
+                csr.start_at_ms = g_self_radio_station.pending_start ? g_self_radio_station.start_at_ms : now_ms;
+            }
+            else
+            {
+                csr.seek_ms = 0;
 
-            const int n = static_cast<int>(songs.size());
-            csr.current_track_index = (csr.current_track_index + 1) % n;
+                const int n = static_cast<int>(songs.size());
+                csr.current_track_index = (csr.current_track_index + 1) % n;
 
-            csr.flags.pending_start = 1;
-            csr.start_at_ms = self_radio_now_ms();
+                csr.flags.pending_start = 1;
+                csr.start_at_ms = now_ms;
+            }
             // fall through to start below
         }
         else
@@ -1167,24 +1495,21 @@ void Update_Ambient_CSelfRadio()
 
     if (!csr.flags.pending_start)
     {
-        if (csr.current_track_index < 0 ||
-            csr.current_track_index >= static_cast<int>(songs.size()))
-        {
-            csr.current_track_index =
-                static_cast<int>(csr.playback_seed % songs.size());
-        }
-
         csr.flags.pending_start = 1;
-        csr.start_at_ms = self_radio_now_ms();
+        if (g_self_radio_sync_all && g_self_radio_station.active)
+            csr.start_at_ms = g_self_radio_station.pending_start ? g_self_radio_station.start_at_ms : now_ms;
+        else
+            csr.start_at_ms = now_ms;
     }
 
-    if (self_radio_now_ms() >= csr.start_at_ms)
+    if (now_ms >= csr.start_at_ms)
         self_radio_start_playback_ambient(&csr, world_pos);
 }
 
 void gameplay_loop()
 {
     cdecl_call(sub_935B80);
+    self_radio_station_update();
     Update_Ambient_CSelfRadio();
     g_cached_game_volume = get_game_volume();
 
@@ -1265,6 +1590,7 @@ void BlingMenuOptions() {
     if (BlingMenuLoad()) {
         BlingMenuAddCategory(kSelfRadioMenuPath);
         BlingMenuAddBool(kSelfRadioMenuPath, "Enable 3D", &g_self_radio_enable_3d, nullptr);
+        BlingMenuAddBool(kSelfRadioMenuPath, "Sync All", &g_self_radio_sync_all, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Force 2D", &g_self_radio_force_2d, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Force 3D", &g_self_radio_force_3d, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Use Velocity", &g_self_radio_use_velocity, nullptr);
