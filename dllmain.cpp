@@ -161,6 +161,7 @@ public:
         std::unordered_set<std::string> seen_dirs;
         printf("[SelfRadio] Reloading songs...\n");
         LoadSongsFromDirectory(GetExeDirectory() / "SelfRadio", seen_dirs);
+        if(GetExeDirectory() != GetDllDirectoryS())
         LoadSongsFromDirectory(GetDllDirectoryS() / "SelfRadio", seen_dirs);
 
         std::sort(m_songs.begin(), m_songs.end(), [](const SelfRadioSong& lhs, const SelfRadioSong& rhs) {
