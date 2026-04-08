@@ -1087,12 +1087,15 @@ void gameplay_loop()
     Update_Ambient_CSelfRadio();
     g_cached_game_volume = get_game_volume();
 
+    const bool paused = havok_paused();
+
     for (CSelfRadio* csr : g_self_radios)
     {
         if (!csr || !csr->channel)
             continue;
 
         csr->channel->setVolume(g_cached_game_volume);
+        csr->channel->setPaused(paused);
     }
 
     if (auto* system = g_self_radio_song_library.GetSystem())
