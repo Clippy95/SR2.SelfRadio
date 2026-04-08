@@ -515,6 +515,54 @@ public:
 
 };
 
+std::unordered_map<uintptr_t, CSelfRadio> g_ambient_states;
+std::vector<uintptr_t> g_ambient_insertion_order;
+size_t g_ambient_eviction_index = 0;
+
+constexpr size_t kAmbientPoolInitial = 64;
+constexpr size_t kAmbientPoolMax = 256;
+
+CSelfRadio& ambient_state_get_or_create(uintptr_t ambient_ptr)
+{
+    auto it = g_ambient_states.find(ambient_ptr);
+    if (it != g_ambient_states.end())
+        return it->second;
+
+    if (g_ambient_states.size() >= kAmbientPoolMax)
+    {
+        uintptr_t evict = g_ambient_insertion_order[g_ambient_eviction_index];
+        // Stop audio on evicted entry before removing
+        g_ambient_states[evict].Reset(true);
+        g_ambient_states.erase(evict);
+        g_ambient_insertion_order[g_ambient_eviction_index] = ambient_ptr;
+        g_ambient_eviction_index = (g_ambient_eviction_index + 1) % kAmbientPoolMax;
+    }
+    else
+    {
+        g_ambient_insertion_order.push_back(ambient_ptr);
+    }
+
+    CSelfRadio& state = g_ambient_states[ambient_ptr];
+    state.flags.is_ambient = 1;
+    state.playback_seed = self_radio_random_seed();
+    return state;
+}
+
+static void ambient_csr_save_and_stop(CSelfRadio& csr)
+{
+    if (csr.flags.is_playing && csr.channel)
+    {
+        unsigned int pos = 0;
+        if (csr.channel->getPosition(&pos, FMOD_TIMEUNIT_MS) == FMOD_OK)
+            csr.seek_ms = pos;
+        csr.channel->stop();
+        csr.channel = nullptr;
+        csr.current_sound = nullptr;
+        csr.flags.is_playing = 0;
+        csr.flags.pending_start = 0;
+    }
+}
+
 void self_radio_register(CSelfRadio* csr)
 {
     if (!csr)
@@ -968,10 +1016,11 @@ void self_radio_skip_track(CSelfRadio* csr, int delta)
 // Returns the first player-controlled CSelfRadio that is currently active.
 CSelfRadio* self_radio_get_player_controlled()
 {
-    if (Ambient_CSelfRadio && Ambient_CSelfRadio->isPlayerControlled() &&
-        (Ambient_CSelfRadio->flags.is_playing || Ambient_CSelfRadio->flags.pending_start))
+    // Check all active ambient states
+    for (auto& [ptr, csr] : g_ambient_states)
     {
-        return Ambient_CSelfRadio;
+        if (csr.flags.is_playing || csr.flags.pending_start)
+            return &csr;
     }
 
     for (CSelfRadio* csr : g_self_radios)
@@ -987,106 +1036,104 @@ CSelfRadio* self_radio_get_player_controlled()
 
 void Update_Ambient_CSelfRadio()
 {
-    if (!Ambient_CSelfRadio)
-        return;
-
     uintptr_t ambient = *(uintptr_t*)0x2574358;
     uintptr_t emitter = *(uintptr_t*)0x257435C;
 
     if (!emitter || !ambient)
     {
-        if (Ambient_CSelfRadio->flags.is_playing || Ambient_CSelfRadio->flags.pending_start)
-            Ambient_CSelfRadio->Reset(true);
+        for (auto& [ptr, csr] : g_ambient_states)
+            ambient_csr_save_and_stop(csr);
         return;
     }
 
     radio_inst* radio = *(radio_inst**)(emitter + 0x8);
     if (!radio)
     {
-        if (Ambient_CSelfRadio->flags.is_playing || Ambient_CSelfRadio->flags.pending_start)
-            Ambient_CSelfRadio->Reset(true);
+        for (auto& [ptr, csr] : g_ambient_states)
+            ambient_csr_save_and_stop(csr);
         return;
     }
 
     const auto& songs = self_radio_get_songs();
     if (songs.empty() || !g_self_radio_song_library.GetSystem())
-    {
-        self_radio_stop_playback(Ambient_CSelfRadio);
         return;
-    }
 
     const bool is_self_station = is_radio_station_self_radio(radio);
 
+    CSelfRadio& csr = ambient_state_get_or_create(ambient);
+
     if (!is_self_station)
     {
-        if (Ambient_CSelfRadio->flags.is_playing || Ambient_CSelfRadio->flags.pending_start)
-            self_radio_stop_playback(Ambient_CSelfRadio, true);
+        ambient_csr_save_and_stop(csr);
         return;
     }
 
     // --- On Self Radio ---
 
     const FMOD_VECTOR world_pos = ambient_get_pos(ambient);
-    Ambient_CSelfRadio->object_pos = world_pos;
+    csr.object_pos = world_pos;
 
-    // Update 3D attributes on the running channel every frame.
-    if (Ambient_CSelfRadio->flags.is_playing && Ambient_CSelfRadio->channel)
+    if (csr.flags.is_playing && csr.channel)
     {
         const FMOD_VECTOR zero_vel{};
-        Ambient_CSelfRadio->channel->set3DAttributes(&world_pos, &zero_vel);
 
-        // Check if the track ended naturally.
+        if (!g_self_radio_enable_3d || g_self_radio_force_2d)
+        {
+            csr.channel->setMode(FMOD_2D);
+            csr.flags.is_2d = 1;
+        }
+        else
+        {
+            csr.channel->setMode(FMOD_3D | (g_self_radio_use_linear_rolloff ? FMOD_3D_LINEARROLLOFF : FMOD_3D_INVERSEROLLOFF));
+            csr.channel->set3DLevel(g_self_radio_3d_level);
+            csr.channel->set3DSpread(g_self_radio_3d_spread);
+            csr.channel->set3DAttributes(&world_pos, &zero_vel);
+            csr.channel->set3DMinMaxDistance(g_self_radio_min_distance, g_self_radio_max_distance);
+            csr.flags.is_2d = 0;
+        }
+
         bool channel_playing = false;
-        if (Ambient_CSelfRadio->channel->isPlaying(&channel_playing) != FMOD_OK)
+        if (csr.channel->isPlaying(&channel_playing) != FMOD_OK)
             channel_playing = false;
 
         if (!channel_playing)
         {
-            Ambient_CSelfRadio->channel = nullptr;
-            Ambient_CSelfRadio->current_sound = nullptr;
-            Ambient_CSelfRadio->flags.is_playing = 0;
-            Ambient_CSelfRadio->seek_ms = 0;
+            csr.channel = nullptr;
+            csr.current_sound = nullptr;
+            csr.flags.is_playing = 0;
+            csr.seek_ms = 0;
 
             const int n = static_cast<int>(songs.size());
-            Ambient_CSelfRadio->current_track_index =
-                (Ambient_CSelfRadio->current_track_index + 1) % n;
+            csr.current_track_index = (csr.current_track_index + 1) % n;
 
-            // No delay for ambient.
-            Ambient_CSelfRadio->flags.pending_start = 1;
-            Ambient_CSelfRadio->start_at_ms = self_radio_now_ms();
-            // fall through to fire start below
+            csr.flags.pending_start = 1;
+            csr.start_at_ms = self_radio_now_ms();
+            // fall through to start below
         }
         else
         {
-            // Still playing; save seek position.
             unsigned int position_ms = 0;
-            if (Ambient_CSelfRadio->channel->getPosition(&position_ms, FMOD_TIMEUNIT_MS) == FMOD_OK)
-                Ambient_CSelfRadio->seek_ms = position_ms;
+            if (csr.channel->getPosition(&position_ms, FMOD_TIMEUNIT_MS) == FMOD_OK)
+                csr.seek_ms = position_ms;
             return;
         }
     }
 
-    // Queue a start if nothing is pending yet.
-    if (!Ambient_CSelfRadio->flags.pending_start)
+    if (!csr.flags.pending_start)
     {
-        if (Ambient_CSelfRadio->current_track_index < 0 ||
-            Ambient_CSelfRadio->current_track_index >= static_cast<int>(songs.size()))
+        if (csr.current_track_index < 0 ||
+            csr.current_track_index >= static_cast<int>(songs.size()))
         {
-            Ambient_CSelfRadio->current_track_index =
-                static_cast<int>(Ambient_CSelfRadio->playback_seed % songs.size());
+            csr.current_track_index =
+                static_cast<int>(csr.playback_seed % songs.size());
         }
 
-        Ambient_CSelfRadio->flags.pending_start = 1;
-        // No delay: ambient crib radio starts instantly.
-        Ambient_CSelfRadio->start_at_ms = self_radio_now_ms();
+        csr.flags.pending_start = 1;
+        csr.start_at_ms = self_radio_now_ms();
     }
 
-    // Fire when the timer is ready (always immediate for ambient).
-    if (Ambient_CSelfRadio->flags.pending_start &&
-        self_radio_now_ms() >= Ambient_CSelfRadio->start_at_ms)
-    {
-        self_radio_start_playback_ambient(Ambient_CSelfRadio, world_pos);
-    }
+    if (self_radio_now_ms() >= csr.start_at_ms)
+        self_radio_start_playback_ambient(&csr, world_pos);
 }
 
 void gameplay_loop()
@@ -1104,6 +1151,14 @@ void gameplay_loop()
 
         csr->channel->setVolume(g_cached_game_volume);
         csr->channel->setPaused(paused);
+    }
+
+    for (auto& [ptr, csr] : g_ambient_states)
+    {
+        if (!csr.channel)
+            continue;
+        csr.channel->setVolume(g_cached_game_volume);
+        csr.channel->setPaused(paused);
     }
 
     if (auto* system = g_self_radio_song_library.GetSystem())
@@ -1264,6 +1319,9 @@ void late_init()
     self_radio_init();
 
     BlingMenuOptions();
+
+    g_ambient_states.reserve(kAmbientPoolInitial);
+    g_ambient_insertion_order.reserve(kAmbientPoolInitial);
 
     self_radio_Station = thiscall_call<int>(0x4904F0, "SELF RADIO");
     printf("SELF RAIDO1!! %d\n\n\n\n\n\n\n\n\n\n\n\n\n\n", self_radio_Station);
