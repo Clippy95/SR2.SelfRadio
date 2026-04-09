@@ -905,7 +905,7 @@ bool self_radio_start_playback(uintptr_t vehicle, CSelfRadio* csr, radio_inst* r
     csr->flags.pending_start = 0;
     csr->flags.pending_stop = 0;
     csr->synced_to_station = g_self_radio_sync_all && g_self_radio_station.active;
-    if (!g_self_radio_sync_all)
+    if (csr->flags.is_2d)
         self_radio_notify_track(song.name);
     return true;
 }
@@ -961,7 +961,7 @@ bool self_radio_start_playback_ambient(CSelfRadio* csr, const FMOD_VECTOR& world
     csr->flags.pending_start = 0;
     csr->flags.pending_stop = 0;
     csr->synced_to_station = g_self_radio_sync_all && g_self_radio_station.active;
-    if (!g_self_radio_sync_all)
+    if (!csr->flags.is_2d)
         self_radio_notify_track(song.name);
     return true;
 }
