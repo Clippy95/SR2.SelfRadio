@@ -66,6 +66,9 @@
     <ClInclude Include="BlingMenu_public.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\IniReader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">

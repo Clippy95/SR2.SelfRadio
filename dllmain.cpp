@@ -15,6 +15,7 @@
 #include "BlingMenu_public.h"
 #include "buildnumber.h"
 #include <random>
+#include "IniReader.h"
 namespace fs = std::filesystem;
 
 constexpr uint64_t kSelfRadioInitialStartDelayMs = 1500;
@@ -78,6 +79,26 @@ hud_message_params Hud_message_CSelfRadio_params =
 {
     2.4f,0.f,0.f,0.4f,HUD_MESSAGE_PRIORITY_NORMAL,HUD_REGION_DEBUG,0,false,-1,GAT_MUSIC,HUD_MESSAGE_SYNC_LOCAL
 };
+
+
+struct radio_flags
+{
+    unsigned __int16 m_is_police : 1;
+    unsigned __int16 m_is_fbi : 1;
+    unsigned __int16 m_is_pirate : 1;
+    unsigned __int16 m_not_selectable : 1;
+    unsigned __int16 m_is_customizable : 1;
+    unsigned __int16 m_disabled_in_interface : 1;
+    unsigned __int16 m_dont_display_station : 1;
+    unsigned __int16 m_track_delayed : 1;
+    unsigned __int16 m_track_immediately : 1;
+    unsigned __int16 m_ovrlp_delayed : 1;
+    unsigned __int16 m_ovrlp_immediately : 1;
+    unsigned __int16 m_ovrlp_can_be_updated : 1;
+    unsigned __int16 m_ovrlp_is_queued : 1;
+    unsigned __int16 m_is_selfradio : 1;
+};
+
 
 int __declspec(naked) hud_message_asm(const wchar_t* message_text, hud_message_params* a2) {
     __asm {
@@ -374,6 +395,7 @@ private:
 SelfRadioSongLibrary g_self_radio_song_library;
 std::vector<CSelfRadio*> g_self_radios;
 bool g_self_radio_enable_3d = true;
+bool g_self_radio_can_npc_select = true;
 bool g_self_radio_sync_all = false;
 bool g_self_radio_force_2d = false;
 bool g_self_radio_force_3d = false;
@@ -1623,9 +1645,16 @@ void radio_tuner_update_hook(uintptr_t vehicle)
 uintptr_t sub_9551F0;
 
 void BlingMenuOptions() {
+    CIniReader ini;
+
+    g_self_radio_sync_all = ini.ReadBoolean("OPTIONS", "Sync All", false);
+    g_self_radio_min_distance = ini.ReadFloat("OPTIONS", "3D Min Distance", 2.f);
+    g_self_radio_max_distance = ini.ReadFloat("OPTIONS", "3D Max Distance", 45.f);
+    g_self_radio_can_npc_select = ini.ReadBoolean("OPTIONS", "Can NPCs Select Self Radio", true);
     if (BlingMenuLoad()) {
         BlingMenuAddCategory(kSelfRadioMenuPath);
         BlingMenuAddBool(kSelfRadioMenuPath, "Enable 3D", &g_self_radio_enable_3d, nullptr);
+        BlingMenuAddBool(kSelfRadioMenuPath, "Enable 3D", &g_self_radio_can_npc_select, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Sync All", &g_self_radio_sync_all, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Force 2D", &g_self_radio_force_2d, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Force 3D", &g_self_radio_force_3d, nullptr);
@@ -1811,6 +1840,41 @@ void MainHook()
     InterceptCall(0x489A51, radio_tuner_update_og, radio_tuner_update_hook);
 
     Patch<void*>((0xAE2B0B + 1), &vehicle_create_callback_addr);
+
+    static auto new_radio_parse_flags = safetyhook::create_mid(0x48FB19, [](SafetyHookContext& ctx) {
+
+        const char* radio_flag = (const char*)ctx.eax;
+        radio_flags* flags = (radio_flags*)(ctx.ebp + 0x3C);
+        if (!strcmp("Self Radio",radio_flag)) 
+        {
+
+            flags->m_is_selfradio = 1;
+        }
+
+        });
+
+    static auto vint_populate_playlist_gnere = safetyhook::create_mid(0x777721, [](SafetyHookContext& ctx) {
+
+        radio_flags* flags = (radio_flags*)(ctx.edi + 0x3C);
+        if (flags->m_is_selfradio)
+        {
+
+            ctx.eip = 0x77780F;
+        }
+
+        });
+
+    static auto radio_tuner_npc_can_select_station_midhook = safetyhook::create_mid(0x48E624, [](SafetyHookContext& ctx) {
+
+        radio_flags flags = (radio_flags)(ctx.eax);
+
+        if (!g_self_radio_can_npc_select && flags.m_is_selfradio) {
+            ctx.eip = 0x48E621;
+        }
+
+        });
+
+
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule,

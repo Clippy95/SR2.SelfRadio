@@ -90,7 +90,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\safetyhook;$(ProjectDir)include\fmod;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\safetyhook;$(ProjectDir)include\fmod;$(ProjectDir)include\mini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <LanguageStandard>stdcpp23</LanguageStandard>
     </ClCompile>
@@ -124,7 +124,7 @@ popd</Command>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\safetyhook;$(ProjectDir)include\fmod;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\safetyhook;$(ProjectDir)include\fmod;$(ProjectDir)include\mini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <LanguageStandard>stdcpp23</LanguageStandard>
     </ClCompile>
@@ -156,7 +156,7 @@ popd</Command>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\safetyhook;$(ProjectDir)include\fmod;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\safetyhook;$(ProjectDir)include\fmod;$(ProjectDir)include\mini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <LanguageStandard>stdcpp23</LanguageStandard>
     </ClCompile>
@@ -190,7 +190,7 @@ popd</Command>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\safetyhook;$(ProjectDir)include\fmod;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)include\safetyhook;$(ProjectDir)include\fmod;$(ProjectDir)include\mini;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <LanguageStandard>stdcpp23</LanguageStandard>
     </ClCompile>
@@ -225,6 +225,7 @@ popd</Command>
     <ClInclude Include="include\fmod\fmod_dsp_effects.h" />
     <ClInclude Include="include\fmod\fmod_errors.h" />
     <ClInclude Include="include\fmod\fmod_output.h" />
+    <ClInclude Include="include\IniReader.h" />
     <ClInclude Include="include\safetyhook\MemoryMgr.h" />
     <ClInclude Include="include\safetyhook\safetyhook.hpp" />
     <ClInclude Include="include\safetyhook\Zydis.h" />
