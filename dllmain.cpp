@@ -394,9 +394,11 @@ private:
 
 SelfRadioSongLibrary g_self_radio_song_library;
 std::vector<CSelfRadio*> g_self_radios;
+float g_self_radio_volume = 1.f;
 bool g_self_radio_enable_3d = true;
 bool g_self_radio_can_npc_select = true;
 bool g_self_radio_sync_all = false;
+bool g_self_radio_random_start = false;
 bool g_self_radio_force_2d = false;
 bool g_self_radio_force_3d = false;
 bool g_self_radio_use_velocity = false;
@@ -514,10 +516,10 @@ FMOD_VECTOR player_get_pos() {
     };
     return playerPos;
 }
-
+static std::mt19937 rng{ std::random_device{}() };
 static uint32_t self_radio_random_seed()
 {
-    static std::mt19937 rng{ std::random_device{}() };
+
     static std::uniform_int_distribution<uint32_t> dist;
     return dist(rng);
 }
@@ -789,8 +791,9 @@ float get_game_volume()
         return 0.f;
     }
 
-    float gameMusicVol = *(float*)0x00EE34E0 / 3.0f;
-    return gameMusicVol;
+    float gameMusicVol = *(float*)0x00EE34E0;
+
+    return gameMusicVol * g_self_radio_volume;
 
 }
 
@@ -1230,6 +1233,22 @@ static void self_radio_station_apply_to(CSelfRadio* csr, uint64_t now_ms)
     csr->synced_to_station = true;
 }
 
+static uint32_t self_radio_random_start_seek(uint32_t length_ms)
+{
+    if (length_ms == 0)
+        return 0;
+
+
+    static std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    // Take the minimum of two uniform samples — biases toward the first half.
+    const float a = dist(rng);
+    const float b = dist(rng);
+    const float t = min(a, b);
+
+    return static_cast<uint32_t>(t * static_cast<float>(length_ms));
+}
+
 void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
 {
     if (!csr || !csr->flags.object_alive || !csr->object)
@@ -1340,6 +1359,13 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
             csr->start_at_ms = g_self_radio_station.pending_start ? g_self_radio_station.start_at_ms : now_ms;
         else
         {
+            // Random start position when enabled — applies to ALL vehicles (2D and 3D),
+            // only on the non-sync path, only on a genuine cold start.
+            if (g_self_radio_random_start && csr->seek_ms == 0)
+            {
+                const uint32_t length_ms = self_radio_get_track_length_ms(csr->current_track_index);
+                csr->seek_ms = self_radio_random_start_seek(length_ms);
+            }
             const bool apply_delay = switched_to_self_radio;
             csr->start_at_ms = now_ms + (apply_delay ? kSelfRadioInitialStartDelayMs : 0);
         }
@@ -1557,7 +1583,14 @@ void Update_Ambient_CSelfRadio()
         if (g_self_radio_sync_all && g_self_radio_station.active)
             csr.start_at_ms = g_self_radio_station.pending_start ? g_self_radio_station.start_at_ms : now_ms;
         else
+        {
+            if (g_self_radio_random_start && csr.seek_ms == 0)
+            {
+                const uint32_t length_ms = self_radio_get_track_length_ms(csr.current_track_index);
+                csr.seek_ms = self_radio_random_start_seek(length_ms);
+            }
             csr.start_at_ms = now_ms;
+        }
     }
 
     if (now_ms >= csr.start_at_ms)
@@ -1647,15 +1680,19 @@ uintptr_t sub_9551F0;
 void BlingMenuOptions() {
     CIniReader ini;
 
+    g_self_radio_volume = std::clamp(ini.ReadFloat("OPTIONS", "Volume", 0.45f),0.f,4.f);
     g_self_radio_sync_all = ini.ReadBoolean("OPTIONS", "Sync All", false);
+    g_self_radio_random_start = ini.ReadBoolean("OPTIONS", "Random Start", false);
     g_self_radio_min_distance = ini.ReadFloat("OPTIONS", "3D Min Distance", 2.f);
     g_self_radio_max_distance = ini.ReadFloat("OPTIONS", "3D Max Distance", 45.f);
     g_self_radio_can_npc_select = ini.ReadBoolean("OPTIONS", "Can NPCs Select Self Radio", true);
     if (BlingMenuLoad()) {
         BlingMenuAddCategory(kSelfRadioMenuPath);
+        BlingMenuAddFloat(kSelfRadioMenuPath, "Volume", &g_self_radio_volume, []() {CIniReader ini; ini.WriteFloat("OPTIONS", "Volume", g_self_radio_volume); }, 0.05, 0.f, 4.f);
         BlingMenuAddBool(kSelfRadioMenuPath, "Enable 3D", &g_self_radio_enable_3d, nullptr);
-        BlingMenuAddBool(kSelfRadioMenuPath, "Enable 3D", &g_self_radio_can_npc_select, nullptr);
+        BlingMenuAddBool(kSelfRadioMenuPath, "Can NPC select", &g_self_radio_can_npc_select, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Sync All", &g_self_radio_sync_all, nullptr);
+        BlingMenuAddBool(kSelfRadioMenuPath, "Random Start", &g_self_radio_random_start, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Force 2D", &g_self_radio_force_2d, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Force 3D", &g_self_radio_force_3d, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Use Velocity", &g_self_radio_use_velocity, nullptr);
