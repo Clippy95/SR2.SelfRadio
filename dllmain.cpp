@@ -181,7 +181,7 @@ public:
 
         std::unordered_set<std::string> seen_dirs;
         printf("[SelfRadio] Reloading songs...\n");
-        LoadSongsFromDirectory(GetExeDirectory() / "SelfRadio", seen_dirs);
+        //LoadSongsFromDirectory(GetExeDirectory() / "SelfRadio", seen_dirs);
         if(GetExeDirectory() != GetDllDirectoryS())
         LoadSongsFromDirectory(GetDllDirectoryS() / "SelfRadio", seen_dirs);
 
