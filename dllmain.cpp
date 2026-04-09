@@ -399,6 +399,7 @@ bool g_self_radio_enable_3d = true;
 bool g_self_radio_can_npc_select = true;
 bool g_self_radio_sync_all = false;
 bool g_self_radio_random_start = false;
+bool g_self_radio_shuffle = false;
 bool g_self_radio_force_2d = false;
 bool g_self_radio_force_3d = false;
 bool g_self_radio_use_velocity = false;
@@ -522,6 +523,20 @@ static uint32_t self_radio_random_seed()
 
     static std::uniform_int_distribution<uint32_t> dist;
     return dist(rng);
+}
+
+static int self_radio_random_track(int current_index, int count)
+{
+    if (count <= 1)
+        return 0;
+
+    std::uniform_int_distribution<int> dist(0, count - 2);
+
+    // Pick from all tracks except current, then offset past it to avoid repeat.
+    int idx = dist(rng);
+    if (idx >= current_index)
+        idx++;
+    return idx;
 }
 
 class CSelfRadio {
@@ -1185,7 +1200,9 @@ static void self_radio_station_update()
             break;
 
         g_self_radio_station.seek_ms -= length_ms;
-        g_self_radio_station.track_index = (g_self_radio_station.track_index + 1) % static_cast<int>(songs.size());
+        g_self_radio_station.track_index = g_self_radio_shuffle
+            ? self_radio_random_track(g_self_radio_station.track_index, songs.size())
+            : (g_self_radio_station.track_index + 1) % songs.size();
         self_radio_notify_track(songs[g_self_radio_station.track_index].name);
     }
 }
@@ -1324,7 +1341,9 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
             else
             {
                 csr->seek_ms = 0;
-                csr->current_track_index = (csr->current_track_index + 1) % static_cast<int>(songs.size());
+                csr->current_track_index = g_self_radio_shuffle
+                    ? self_radio_random_track(csr->current_track_index, songs.size())
+                    : (csr->current_track_index + 1) % songs.size();
                 csr->flags.pending_start = 1;
                 csr->start_at_ms = now_ms;
             }
@@ -1561,7 +1580,9 @@ void Update_Ambient_CSelfRadio()
                 csr.seek_ms = 0;
 
                 const int n = static_cast<int>(songs.size());
-                csr.current_track_index = (csr.current_track_index + 1) % n;
+                csr.current_track_index = g_self_radio_shuffle
+                    ? self_radio_random_track(csr.current_track_index, n)
+                    : (csr.current_track_index + 1) % n;
 
                 csr.flags.pending_start = 1;
                 csr.start_at_ms = now_ms;
@@ -1682,6 +1703,7 @@ void BlingMenuOptions() {
 
     g_self_radio_volume = std::clamp(ini.ReadFloat("OPTIONS", "Volume", 0.45f),0.f,4.f);
     g_self_radio_sync_all = ini.ReadBoolean("OPTIONS", "Sync All", false);
+    g_self_radio_shuffle = ini.ReadBoolean("OPTIONS", "Shuffle", false);
     g_self_radio_random_start = ini.ReadBoolean("OPTIONS", "Random Start", false);
     g_self_radio_min_distance = ini.ReadFloat("OPTIONS", "3D Min Distance", 2.f);
     g_self_radio_max_distance = ini.ReadFloat("OPTIONS", "3D Max Distance", 45.f);
@@ -1692,7 +1714,7 @@ void BlingMenuOptions() {
         BlingMenuAddBool(kSelfRadioMenuPath, "Enable 3D", &g_self_radio_enable_3d, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Can NPC select", &g_self_radio_can_npc_select, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Sync All", &g_self_radio_sync_all, nullptr);
-        BlingMenuAddBool(kSelfRadioMenuPath, "Random Start", &g_self_radio_random_start, nullptr);
+        BlingMenuAddBool(kSelfRadioMenuPath, "Shuffle", &g_self_radio_shuffle, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Force 2D", &g_self_radio_force_2d, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Force 3D", &g_self_radio_force_3d, nullptr);
         BlingMenuAddBool(kSelfRadioMenuPath, "Use Velocity", &g_self_radio_use_velocity, nullptr);
