@@ -831,8 +831,8 @@ bool is_radio_station_self_radio(radio_inst* radioi)
 uintptr_t radio_tuner_update_og;
 
 uintptr_t radio_tuner_should_be_2d_for_vehicle_addr = 0x48C500;
-int radio_tuner_should_be_2d_for_vehicle(uintptr_t vehicle) {
-    int result;
+BOOL radio_tuner_should_be_2d_for_vehicle(uintptr_t vehicle) {
+    BOOL result;
     __asm {
         push esi
         mov esi, vehicle
@@ -1761,7 +1761,10 @@ void radio_tuner_update_hook(uintptr_t vehicle)
 
     self_radio_update(csr, switched_to_self_radio);
 
-    csr->user_lpf = vehicle_audio_find_lpf_level(vehicle, 4, 1);
+    if (!radio_tuner_should_be_2d_for_vehicle(vehicle))
+        csr->user_lpf = vehicle_audio_find_lpf_level(vehicle, 4, 1);
+    else
+        csr->user_lpf = 0.f;
 }
 
 uintptr_t sub_9551F0;
