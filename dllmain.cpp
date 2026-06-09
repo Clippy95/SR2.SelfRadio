@@ -157,6 +157,18 @@ struct SelfRadioSong
     uint32_t length_ms = 0;
 };
 
+static void self_radio_show_exception(const char* context, const char* what)
+{
+    static char buf[1024];
+    std::snprintf(buf, sizeof(buf),
+        "SelfRadio encountered an error in: %s\n\n"
+        "Error: %s\n\n"
+        "Songs will not be loaded from this path.\n"
+        "Check that your SelfRadio folder exists and is accessible.",
+        context, what);
+    MessageBoxA(nullptr, buf, "SelfRadio - Error", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+}
+
 class SelfRadioSongLibrary
 {
 public:
@@ -181,9 +193,22 @@ public:
 
         std::unordered_set<std::string> seen_dirs;
         printf("[SelfRadio] Reloading songs...\n");
-        //LoadSongsFromDirectory(GetExeDirectory() / "SelfRadio", seen_dirs);
-        if(GetExeDirectory() != GetDllDirectoryS())
-        LoadSongsFromDirectory(GetDllDirectoryS() / "SelfRadio", seen_dirs);
+
+        try
+        {
+            if (GetExeDirectory() != GetDllDirectoryS())
+                LoadSongsFromDirectory(GetDllDirectoryS() / "SelfRadio", seen_dirs);
+        }
+        catch (const std::exception& e)
+        {
+            printf("[SelfRadio] Exception in LoadSongsFromDirectory: %s\n", e.what());
+            self_radio_show_exception("LoadSongsFromDirectory", e.what());
+        }
+        catch (...)
+        {
+            printf("[SelfRadio] Unknown exception in LoadSongsFromDirectory\n");
+            self_radio_show_exception("LoadSongsFromDirectory", "Unknown exception");
+        }
 
         std::sort(m_songs.begin(), m_songs.end(), [](const SelfRadioSong& lhs, const SelfRadioSong& rhs) {
             if (lhs.name != rhs.name)
@@ -336,47 +361,90 @@ private:
 
     void LoadSongsFromDirectory(const fs::path& directory, std::unordered_set<std::string>& seen_dirs)
     {
-        if (directory.empty() || !fs::exists(directory) || !fs::is_directory(directory))
-            return;
-
-        const std::string normalized_dir = NormalizePathString(directory);
-        if (!seen_dirs.emplace(normalized_dir).second)
-            return;
-
-        printf("[SelfRadio] Scanning: %s\n", directory.string().c_str());
-
-        for (const fs::directory_entry& entry : fs::directory_iterator(directory))
+        try
         {
-            if (!entry.is_regular_file())
-                continue;
+            if (directory.empty())
+                return;
 
-            const fs::path source_path = entry.path();
-            fs::path song_path = source_path;
-            if (IsShortcutFile(source_path) && !TryResolveShortcutTarget(source_path, song_path))
+            // Wrap exists/is_directory individually — these can throw on bad paths
+            bool dir_exists = false;
+            bool is_dir = false;
+            try { dir_exists = fs::exists(directory); }
+            catch (...) { printf("[SelfRadio] exists() threw for: %s\n", directory.string().c_str()); return; }
+            try { is_dir = fs::is_directory(directory); }
+            catch (...) { printf("[SelfRadio] is_directory() threw for: %s\n", directory.string().c_str()); return; }
+
+            if (!dir_exists || !is_dir)
+                return;
+
+            const std::string normalized_dir = NormalizePathString(directory);
+            if (!seen_dirs.emplace(normalized_dir).second)
+                return;
+
+            printf("[SelfRadio] Scanning: %s\n", directory.string().c_str());
+
+            fs::directory_iterator it;
+            try { it = fs::directory_iterator(directory); }
+            catch (const std::exception& e)
             {
-                printf("[SelfRadio] Failed to resolve shortcut: %s\n", source_path.string().c_str());
-                continue;
+                printf("[SelfRadio] Failed to open directory '%s': %s\n", directory.string().c_str(), e.what());
+                return;
             }
 
-            FMOD::Sound* sound = nullptr;
-            const FMOD_RESULT result = m_system->createStream(
-                song_path.string().c_str(),
-                FMOD_CREATESTREAM | FMOD_LOOP_OFF,
-                nullptr,
-                &sound);
+            for (const fs::directory_entry& entry : it)
+            {
+                try
+                {
+                    if (!entry.is_regular_file())
+                        continue;
 
-            if (result != FMOD_OK || !sound)
-                continue;
+                    const fs::path source_path = entry.path();
+                    fs::path song_path = source_path;
+                    if (IsShortcutFile(source_path) && !TryResolveShortcutTarget(source_path, song_path))
+                    {
+                        printf("[SelfRadio] Failed to resolve shortcut: %s\n", source_path.string().c_str());
+                        continue;
+                    }
 
-            SelfRadioSong song{};
-            song.name = MakeSongName(source_path);
-            song.path = song_path;
-            unsigned int length_ms = 0;
-            if (sound->getLength(&length_ms, FMOD_TIMEUNIT_MS) == FMOD_OK)
-                song.length_ms = length_ms;
-            sound->release();
-            printf("[SelfRadio] Found song: %s (%s)\n", song.name.c_str(), song.path.string().c_str());
-            m_songs.push_back(std::move(song));
+                    FMOD::Sound* sound = nullptr;
+                    const FMOD_RESULT result = m_system->createStream(
+                        song_path.string().c_str(),
+                        FMOD_CREATESTREAM | FMOD_LOOP_OFF,
+                        nullptr,
+                        &sound);
+
+                    if (result != FMOD_OK || !sound)
+                        continue;
+
+                    SelfRadioSong song{};
+                    song.name = MakeSongName(source_path);
+                    song.path = song_path;
+                    unsigned int length_ms = 0;
+                    if (sound->getLength(&length_ms, FMOD_TIMEUNIT_MS) == FMOD_OK)
+                        song.length_ms = length_ms;
+                    sound->release();
+                    printf("[SelfRadio] Found song: %s (%s)\n", song.name.c_str(), song.path.string().c_str());
+                    m_songs.push_back(std::move(song));
+                }
+                catch (const std::exception& e)
+                {
+                    printf("[SelfRadio] Exception processing entry: %s\n", e.what());
+                }
+                catch (...)
+                {
+                    printf("[SelfRadio] Unknown exception processing entry\n");
+                }
+            }
+        }
+        catch (const std::exception& e)
+        {
+            printf("[SelfRadio] Exception in LoadSongsFromDirectory: %s\n", e.what());
+            self_radio_show_exception("LoadSongsFromDirectory", e.what());
+        }
+        catch (...)
+        {
+            printf("[SelfRadio] Unknown exception in LoadSongsFromDirectory\n");
+            self_radio_show_exception("LoadSongsFromDirectory", "Unknown exception");
         }
     }
 
