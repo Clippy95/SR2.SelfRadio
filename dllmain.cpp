@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cwctype>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -128,6 +129,42 @@ void hud_message(const wchar_t* message_text, hud_message_params* params)
     __asm popad
 }
 
+static std::string path_to_utf8_string(const fs::path& path)
+{
+    const auto utf8 = path.u8string();
+    return std::string(utf8.begin(), utf8.end());
+}
+
+static std::wstring utf8_to_wide(std::string_view value)
+{
+    if (value.empty())
+        return {};
+
+    int wide_length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (wide_length <= 0)
+        wide_length = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (wide_length <= 0)
+        return std::wstring(value.begin(), value.end());
+
+    std::wstring wide(static_cast<size_t>(wide_length), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), wide.data(), wide_length) <= 0)
+        return std::wstring(value.begin(), value.end());
+
+    return wide;
+}
+
+static FMOD_RESULT self_radio_create_stream_for_path(FMOD::System* system, const fs::path& path, FMOD_MODE mode, FMOD::Sound** sound)
+{
+    if (!system || !sound)
+        return FMOD_ERR_INVALID_PARAM;
+
+    const std::string utf8_path = path_to_utf8_string(path);
+    if (utf8_path.empty())
+        return FMOD_ERR_INVALID_PARAM;
+
+    return system->createStream(utf8_path.c_str(), mode, nullptr, sound);
+}
+
 static void self_radio_notify_track(const std::string& name)
 {
     static std::string last_notified;
@@ -137,7 +174,7 @@ static void self_radio_notify_track(const std::string& name)
 
     static wchar_t wide_buf[256];
     std::wstring wide = L"Self Radio now playing: ";
-    wide += std::wstring(name.begin(), name.end());
+    wide += utf8_to_wide(name);
     wcsncpy(wide_buf, wide.c_str(), 255);
     wide_buf[255] = L'\0';
 
@@ -191,7 +228,7 @@ public:
         if (!EnsureFMOD())
             return 0;
 
-        std::unordered_set<std::string> seen_dirs;
+        std::unordered_set<std::wstring> seen_dirs;
         printf("[SelfRadio] Reloading songs...\n");
 
         try
@@ -213,7 +250,7 @@ public:
         std::sort(m_songs.begin(), m_songs.end(), [](const SelfRadioSong& lhs, const SelfRadioSong& rhs) {
             if (lhs.name != rhs.name)
                 return lhs.name < rhs.name;
-            return lhs.path.string() < rhs.path.string();
+            return lhs.path.native() < rhs.path.native();
             });
 
         printf("[SelfRadio] Loaded %zu song(s)\n", m_songs.size());
@@ -250,14 +287,14 @@ public:
     }
 
 private:
-    static std::string GetLowercaseExtension(const fs::path& path)
+    static std::wstring GetLowercaseExtension(const fs::path& path)
     {
         if (!path.has_extension())
             return {};
 
-        std::string ext = path.extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
+        std::wstring ext = path.extension().wstring();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(std::towlower(ch));
             });
 
         return ext;
@@ -265,7 +302,7 @@ private:
 
     static bool IsShortcutFile(const fs::path& path)
     {
-        return GetLowercaseExtension(path) == ".lnk";
+        return GetLowercaseExtension(path) == L".lnk";
     }
 
     static bool TryResolveShortcutTarget(const fs::path& shortcut_path, fs::path& target_path)
@@ -311,32 +348,53 @@ private:
         return resolved;
     }
 
-    static std::string NormalizePathString(const fs::path& path)
+    static std::wstring NormalizePathString(const fs::path& path)
     {
-        std::string value = path.lexically_normal().string();
-        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
+        std::wstring value = path.lexically_normal().native();
+        std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
+            return static_cast<wchar_t>(std::towlower(ch));
             });
         return value;
     }
 
     static std::string MakeSongName(const fs::path& path)
     {
-        return path.stem().string();
+        const auto utf8 = path.stem().u8string();
+        return std::string(utf8.begin(), utf8.end());
+    }
+
+    static fs::path GetModuleDirectory(HMODULE module)
+    {
+        std::wstring buffer(MAX_PATH, L'\0');
+        for (;;)
+        {
+            const DWORD copied = GetModuleFileNameW(module, buffer.data(), static_cast<DWORD>(buffer.size()));
+            if (copied == 0)
+                return {};
+
+            if (copied < buffer.size() - 1)
+            {
+                buffer.resize(copied);
+                return fs::path(buffer).parent_path();
+            }
+
+            buffer.resize(buffer.size() * 2);
+        }
+    }
+
+    static FMOD_RESULT CreateStreamForPath(FMOD::System* system, const fs::path& path, FMOD_MODE mode, FMOD::Sound** sound)
+    {
+        return self_radio_create_stream_for_path(system, path, mode, sound);
     }
 
     fs::path GetExeDirectory() const
     {
-        char buffer[MAX_PATH]{};
-        GetModuleFileNameA(nullptr, buffer, static_cast<DWORD>(std::size(buffer)));
-        return fs::path(buffer).parent_path();
+        return GetModuleDirectory(nullptr);
     }
 
     fs::path GetDllDirectoryS() const
     {
-        char buffer[MAX_PATH]{};
-        GetModuleFileNameA(m_module, buffer, static_cast<DWORD>(std::size(buffer)));
-        return fs::path(buffer).parent_path();
+        return GetModuleDirectory(m_module);
     }
 
     bool EnsureFMOD()
@@ -359,35 +417,35 @@ private:
         return true;
     }
 
-    void LoadSongsFromDirectory(const fs::path& directory, std::unordered_set<std::string>& seen_dirs)
+    void LoadSongsFromDirectory(const fs::path& directory, std::unordered_set<std::wstring>& seen_dirs)
     {
         try
         {
             if (directory.empty())
                 return;
 
-            // Wrap exists/is_directory individually — these can throw on bad paths
+            // Wrap exists/is_directory individually â€” these can throw on bad paths
             bool dir_exists = false;
             bool is_dir = false;
             try { dir_exists = fs::exists(directory); }
-            catch (...) { printf("[SelfRadio] exists() threw for: %s\n", directory.string().c_str()); return; }
+            catch (...) { printf("[SelfRadio] exists() threw for: %s\n", path_to_utf8_string(directory).c_str()); return; }
             try { is_dir = fs::is_directory(directory); }
-            catch (...) { printf("[SelfRadio] is_directory() threw for: %s\n", directory.string().c_str()); return; }
+            catch (...) { printf("[SelfRadio] is_directory() threw for: %s\n", path_to_utf8_string(directory).c_str()); return; }
 
             if (!dir_exists || !is_dir)
                 return;
 
-            const std::string normalized_dir = NormalizePathString(directory);
+            const std::wstring normalized_dir = NormalizePathString(directory);
             if (!seen_dirs.emplace(normalized_dir).second)
                 return;
 
-            printf("[SelfRadio] Scanning: %s\n", directory.string().c_str());
+            printf("[SelfRadio] Scanning: %s\n", path_to_utf8_string(directory).c_str());
 
             fs::directory_iterator it;
             try { it = fs::directory_iterator(directory); }
             catch (const std::exception& e)
             {
-                printf("[SelfRadio] Failed to open directory '%s': %s\n", directory.string().c_str(), e.what());
+                printf("[SelfRadio] Failed to open directory '%s': %s\n", path_to_utf8_string(directory).c_str(), e.what());
                 return;
             }
 
@@ -402,16 +460,12 @@ private:
                     fs::path song_path = source_path;
                     if (IsShortcutFile(source_path) && !TryResolveShortcutTarget(source_path, song_path))
                     {
-                        printf("[SelfRadio] Failed to resolve shortcut: %s\n", source_path.string().c_str());
+                        printf("[SelfRadio] Failed to resolve shortcut: %s\n", path_to_utf8_string(source_path).c_str());
                         continue;
                     }
 
                     FMOD::Sound* sound = nullptr;
-                    const FMOD_RESULT result = m_system->createStream(
-                        song_path.string().c_str(),
-                        FMOD_CREATESTREAM | FMOD_LOOP_OFF,
-                        nullptr,
-                        &sound);
+                    const FMOD_RESULT result = CreateStreamForPath(m_system, song_path, FMOD_CREATESTREAM | FMOD_LOOP_OFF, &sound);
 
                     if (result != FMOD_OK || !sound)
                         continue;
@@ -423,7 +477,7 @@ private:
                     if (sound->getLength(&length_ms, FMOD_TIMEUNIT_MS) == FMOD_OK)
                         song.length_ms = length_ms;
                     sound->release();
-                    printf("[SelfRadio] Found song: %s (%s)\n", song.name.c_str(), song.path.string().c_str());
+                    printf("[SelfRadio] Found song: %s (%s)\n", song.name.c_str(), path_to_utf8_string(song.path).c_str());
                     m_songs.push_back(std::move(song));
                 }
                 catch (const std::exception& e)
@@ -605,6 +659,37 @@ static int self_radio_random_track(int current_index, int count)
     if (idx >= current_index)
         idx++;
     return idx;
+}
+
+static int self_radio_next_track_index(int current_index, size_t count)
+{
+    const int track_count = static_cast<int>(count);
+    if (track_count <= 0)
+        return -1;
+
+    if (g_self_radio_shuffle)
+        return self_radio_random_track(current_index, track_count);
+
+    if (current_index < 0 || current_index >= track_count)
+        return 0;
+
+    return (current_index + 1) % track_count;
+}
+
+static void self_radio_station_advance_after_track_end(uint64_t now_ms)
+{
+    const auto& songs = self_radio_get_songs();
+    if (!g_self_radio_station.active || songs.empty())
+        return;
+
+    g_self_radio_station.track_index = self_radio_next_track_index(g_self_radio_station.track_index, songs.size());
+    g_self_radio_station.seek_ms = 0;
+    g_self_radio_station.pending_start = false;
+    g_self_radio_station.start_at_ms = now_ms;
+    g_self_radio_station.last_update_ms = now_ms;
+
+    if (g_self_radio_station.track_index >= 0)
+        self_radio_notify_track(songs[g_self_radio_station.track_index].name);
 }
 
 class CSelfRadio {
@@ -976,7 +1061,7 @@ bool self_radio_start_playback(uintptr_t vehicle, CSelfRadio* csr, radio_inst* r
 
     const SelfRadioSong& song = songs[csr->current_track_index];
     FMOD::Sound* sound = nullptr;
-    if (system->createStream(song.path.string().c_str(), FMOD_CREATESTREAM | FMOD_LOOP_OFF, nullptr, &sound) != FMOD_OK || !sound)
+    if (self_radio_create_stream_for_path(system, song.path, FMOD_CREATESTREAM | FMOD_LOOP_OFF, &sound) != FMOD_OK || !sound)
         return false;
 
     FMOD::Channel* channel = nullptr;
@@ -1036,7 +1121,7 @@ bool self_radio_start_playback_ambient(CSelfRadio* csr, const FMOD_VECTOR& world
 
     const SelfRadioSong& song = songs[csr->current_track_index];
     FMOD::Sound* sound = nullptr;
-    if (system->createStream(song.path.string().c_str(), FMOD_CREATESTREAM | FMOD_LOOP_OFF, nullptr, &sound) != FMOD_OK || !sound)
+    if (self_radio_create_stream_for_path(system, song.path, FMOD_CREATESTREAM | FMOD_LOOP_OFF, &sound) != FMOD_OK || !sound)
         return false;
 
     FMOD::Channel* channel = nullptr;
@@ -1268,9 +1353,7 @@ static void self_radio_station_update()
             break;
 
         g_self_radio_station.seek_ms -= length_ms;
-        g_self_radio_station.track_index = g_self_radio_shuffle
-            ? self_radio_random_track(g_self_radio_station.track_index, songs.size())
-            : (g_self_radio_station.track_index + 1) % songs.size();
+        g_self_radio_station.track_index = self_radio_next_track_index(g_self_radio_station.track_index, songs.size());
         self_radio_notify_track(songs[g_self_radio_station.track_index].name);
     }
 }
@@ -1326,7 +1409,7 @@ static uint32_t self_radio_random_start_seek(uint32_t length_ms)
 
     static std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
-    // Take the minimum of two uniform samples — biases toward the first half.
+    // Take the minimum of two uniform samples â€” biases toward the first half.
     const float a = dist(rng);
     const float b = dist(rng);
     const float t = min(a, b);
@@ -1401,6 +1484,13 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
             csr->flags.is_playing = 0;
             if (g_self_radio_sync_all && g_self_radio_station.active)
             {
+                if (csr->synced_to_station
+                    && !g_self_radio_station.pending_start
+                    && csr->current_track_index == g_self_radio_station.track_index)
+                {
+                    self_radio_station_advance_after_track_end(now_ms);
+                }
+
                 csr->seek_ms = g_self_radio_station.pending_start ? 0 : g_self_radio_station.seek_ms;
                 csr->current_track_index = g_self_radio_station.track_index;
                 csr->flags.pending_start = 1;
@@ -1409,9 +1499,7 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
             else
             {
                 csr->seek_ms = 0;
-                csr->current_track_index = g_self_radio_shuffle
-                    ? self_radio_random_track(csr->current_track_index, songs.size())
-                    : (csr->current_track_index + 1) % songs.size();
+                csr->current_track_index = self_radio_next_track_index(csr->current_track_index, songs.size());
                 csr->flags.pending_start = 1;
                 csr->start_at_ms = now_ms;
             }
@@ -1446,7 +1534,7 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
             csr->start_at_ms = g_self_radio_station.pending_start ? g_self_radio_station.start_at_ms : now_ms;
         else
         {
-            // Random start position when enabled — applies to ALL vehicles (2D and 3D),
+            // Random start position when enabled â€” applies to ALL vehicles (2D and 3D),
             // only on the non-sync path, only on a genuine cold start.
             if (g_self_radio_random_start && csr->seek_ms == 0)
             {
@@ -1638,6 +1726,13 @@ void Update_Ambient_CSelfRadio()
             csr.flags.is_playing = 0;
             if (g_self_radio_sync_all && g_self_radio_station.active)
             {
+                if (csr.synced_to_station
+                    && !g_self_radio_station.pending_start
+                    && csr.current_track_index == g_self_radio_station.track_index)
+                {
+                    self_radio_station_advance_after_track_end(now_ms);
+                }
+
                 csr.seek_ms = g_self_radio_station.pending_start ? 0 : g_self_radio_station.seek_ms;
                 csr.current_track_index = g_self_radio_station.track_index;
                 csr.flags.pending_start = 1;
@@ -1648,9 +1743,7 @@ void Update_Ambient_CSelfRadio()
                 csr.seek_ms = 0;
 
                 const int n = static_cast<int>(songs.size());
-                csr.current_track_index = g_self_radio_shuffle
-                    ? self_radio_random_track(csr.current_track_index, n)
-                    : (csr.current_track_index + 1) % n;
+                csr.current_track_index = self_radio_next_track_index(csr.current_track_index, n);
 
                 csr.flags.pending_start = 1;
                 csr.start_at_ms = now_ms;
