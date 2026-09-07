@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwctype>
 #include <filesystem>
@@ -99,6 +100,79 @@ struct radio_flags
     unsigned __int16 m_ovrlp_is_queued : 1;
     unsigned __int16 m_is_selfradio : 1;
 };
+
+
+// In-memory XML node layout used by the radio table parser.
+struct xml_node
+{
+    const char* name;
+    xml_node* next;
+    xml_node* elements;
+    const char* text;
+};
+static_assert(sizeof(xml_node) == 0x10);
+
+static void self_radio_add_station(xml_node* table)
+{
+    if (!table)
+        return;
+
+    unsigned int station_count = 0;
+    xml_node** tail = &table->elements;
+    for (; *tail; tail = &(*tail)->next)
+    {
+        const auto* entry = *tail;
+        if (!entry->name || _stricmp(entry->name, "Station"))
+            continue;
+
+        ++station_count;
+        for (const auto* field = entry->elements; field; field = field->next)
+        {
+            if (field->name && !_stricmp(field->name, "Name")
+                && field->text && !_stricmp(field->text, "SELF RADIO"))
+                return; // Keep an existing entry from an older/custom radio.xtbl.
+        }
+    }
+
+    if (station_count == 0 || station_count >= 0xFFFF)
+        return;
+
+    // The game allocates one entry per station, including the one we add.
+    std::vector<bool> used_slots(station_count + 1, false);
+    for (const auto* entry = table->elements; entry; entry = entry->next)
+    {
+        if (!entry->name || _stricmp(entry->name, "Station"))
+            continue;
+
+        for (const auto* field = entry->elements; field; field = field->next)
+        {
+            if (field->name && !_stricmp(field->name, "Slot") && field->text)
+            {
+                const auto index = std::strtoul(field->text, nullptr, 10);
+                if (index < used_slots.size())
+                    used_slots[index] = true;
+            }
+        }
+    }
+
+    const auto free_slot = std::find(used_slots.begin(), used_slots.end(), false);
+    if (free_slot == used_slots.end())
+        return;
+    const auto slot_index = static_cast<unsigned int>(free_slot - used_slots.begin());
+
+    // Append before the game counts/allocates it, so all existing IDs stay intact.
+    // xml_table_close rewinds its temporary pool; it does not free these nodes.
+    static char slot_text[16];
+    static xml_node flag{ "Flag", nullptr, nullptr, "Self Radio" };
+    static xml_node flags{ "Flags", nullptr, &flag, nullptr };
+    static xml_node slot{ "Slot", &flags, nullptr, slot_text };
+    static xml_node playlist{ "Playlist", &slot, nullptr, nullptr };
+    static xml_node name{ "Name", &playlist, nullptr, "SELF RADIO" };
+    static xml_node station{ "Station", nullptr, &name, nullptr };
+    std::snprintf(slot_text, sizeof(slot_text), "%u", slot_index);
+    station.next = nullptr;
+    *tail = &station;
+}
 
 
 int __declspec(naked) hud_message_asm(const wchar_t* message_text, hud_message_params* a2) {
@@ -1985,8 +2059,10 @@ void late_init()
     g_ambient_states.reserve(kAmbientPoolInitial);
     g_ambient_insertion_order.reserve(kAmbientPoolInitial);
 
-    self_radio_Station = thiscall_call<int>(0x4904F0, "SELF RADIO");
-    printf("SELF RAIDO1!! %d\n\n\n\n\n\n\n\n\n\n\n\n\n\n", self_radio_Station);
+    const auto station = thiscall_call<uint16_t>(0x4904F0, "SELF RADIO");
+    const auto off_station = thiscall_call<uint16_t>(0x4904F0, "OFF");
+    self_radio_Station = station != off_station ? station : -1;
+    printf("[SelfRadio] Station ID: %d\n", self_radio_Station);
 }
 
 uintptr_t object_free_this_addr;
@@ -2063,6 +2139,10 @@ void MainHook()
     InterceptCall(0x489A51, radio_tuner_update_og, radio_tuner_update_hook);
 
     Patch<void*>((0xAE2B0B + 1), &vehicle_create_callback_addr);
+
+    static auto add_self_radio_station = safetyhook::create_mid(0x49025F, [](SafetyHookContext& ctx) {
+        self_radio_add_station(reinterpret_cast<xml_node*>(ctx.eax));
+        });
 
     static auto new_radio_parse_flags = safetyhook::create_mid(0x48FB19, [](SafetyHookContext& ctx) {
 
