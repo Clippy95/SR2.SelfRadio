@@ -1,0 +1,53 @@
+name: Build and package
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Release x86
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          # gitrev.bat uses the commit count for the build number.
+          fetch-depth: 0
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build ASI and PDB
+        run: msbuild SR2.SelfRadio.sln /m /t:Rebuild /p:Configuration=Release /p:Platform=x86
+
+      - name: Package ZIP
+        run: |
+          $files = @(
+            'Release/SR2.SelfRadio.asi'
+            'Release/SR2.SelfRadio.pdb'
+            'LICENSE.txt'
+          )
+          foreach ($file in $files) {
+            if (!(Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Required package file is missing: $file"
+            }
+          }
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          Compress-Archive -LiteralPath $files -DestinationPath artifacts/SR2.SelfRadio.zip -Force
+
+      - name: Upload ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          path: artifacts/SR2.SelfRadio.zip
+          # Upload the ZIP directly instead of wrapping it in another ZIP.
+          archive: false
+          if-no-files-found: error
