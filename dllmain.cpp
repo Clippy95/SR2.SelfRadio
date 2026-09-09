@@ -239,8 +239,11 @@ static FMOD_RESULT self_radio_create_stream_for_path(FMOD::System* system, const
     return system->createStream(utf8_path.c_str(), mode, nullptr, sound);
 }
 
+bool g_self_radio_show_current_playing = true;
 static void self_radio_notify_track(const std::string& name)
 {
+    if (!g_self_radio_show_current_playing)
+        return;
     static std::string last_notified;
     if (name == last_notified)
         return;
@@ -1936,6 +1939,8 @@ void radio_tuner_update_hook(uintptr_t vehicle)
 
 uintptr_t sub_9551F0;
 
+static bool g_self_radio_hide_in_selector = true;
+
 void BlingMenuOptions() {
     CIniReader ini;
 
@@ -1946,6 +1951,8 @@ void BlingMenuOptions() {
     g_self_radio_min_distance = ini.ReadFloat("OPTIONS", "3D Min Distance", 2.f);
     g_self_radio_max_distance = ini.ReadFloat("OPTIONS", "3D Max Distance", 45.f);
     g_self_radio_can_npc_select = ini.ReadBoolean("OPTIONS", "Can NPCs Select Self Radio", true);
+    g_self_radio_hide_in_selector = ini.ReadBoolean("OPTIONS", "Hide In Selector", true);
+    g_self_radio_show_current_playing = ini.ReadBoolean("OPTIONS", "Show current playing", true);
     if (BlingMenuLoad()) {
         BlingMenuAddCategory(kSelfRadioMenuPath);
         BlingMenuAddFloat(kSelfRadioMenuPath, "Volume", &g_self_radio_volume, []() {CIniReader ini; ini.WriteFloat("OPTIONS", "Volume", g_self_radio_volume); }, 0.05, 0.f, 4.f);
@@ -2159,7 +2166,7 @@ void MainHook()
     static auto vint_populate_playlist_gnere = safetyhook::create_mid(0x777721, [](SafetyHookContext& ctx) {
 
         radio_flags* flags = (radio_flags*)(ctx.edi + 0x3C);
-        if (flags->m_is_selfradio)
+        if (g_self_radio_hide_in_selector && flags->m_is_selfradio)
         {
 
             ctx.eip = 0x77780F;
