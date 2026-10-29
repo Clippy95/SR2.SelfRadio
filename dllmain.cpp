@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cwctype>
 #include <filesystem>
+#include <numeric>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -641,6 +642,11 @@ struct SelfRadioStationState
 SelfRadioStationState g_self_radio_station{};
 bool g_self_radio_sync_all_prev = false;
 
+// Shuffle bag: one shuffled pass over every track. back() is the next track to play;
+// when it runs out a new round is shuffled, so no track repeats until all have played.
+static std::vector<int> g_shuffle_bag;
+static int g_shuffle_bag_count = 0;
+
 bool self_radio_init()
 {
     return g_self_radio_song_library.Init(g_dll_module);
@@ -648,6 +654,7 @@ bool self_radio_init()
 
 size_t self_radio_reload_songs()
 {
+    g_shuffle_bag.clear(); // track indices change on reload, start a fresh round
     return g_self_radio_song_library.ReloadSongs();
 }
 
@@ -729,12 +736,21 @@ static int self_radio_random_track(int current_index, int count)
     if (count <= 1)
         return 0;
 
-    std::uniform_int_distribution<int> dist(0, count - 2);
+    if (g_shuffle_bag.empty() || g_shuffle_bag_count != count)
+    {
+        // New round (or the library size changed): shuffle every track index once.
+        g_shuffle_bag.resize(count);
+        std::iota(g_shuffle_bag.begin(), g_shuffle_bag.end(), 0);
+        std::shuffle(g_shuffle_bag.begin(), g_shuffle_bag.end(), rng);
+        g_shuffle_bag_count = count;
 
-    // Pick from all tracks except current, then offset past it to avoid repeat.
-    int idx = dist(rng);
-    if (idx >= current_index)
-        idx++;
+        // Don't let the new round open with the track that just finished.
+        if (g_shuffle_bag.back() == current_index)
+            std::swap(g_shuffle_bag.back(), g_shuffle_bag.front());
+    }
+
+    const int idx = g_shuffle_bag.back();
+    g_shuffle_bag.pop_back();
     return idx;
 }
 
@@ -751,6 +767,20 @@ static int self_radio_next_track_index(int current_index, size_t count)
         return 0;
 
     return (current_index + 1) % track_count;
+}
+
+// First track for a radio that has none yet (new car, crib radio, after a reload).
+// With shuffle on it comes from the shuffle bag so switching cars doesn't repeat songs;
+// otherwise each radio starts at its own random point and plays in order from there.
+static int self_radio_initial_track(uint32_t playback_seed, size_t count)
+{
+    if (count == 0)
+        return -1;
+
+    if (g_self_radio_shuffle)
+        return self_radio_random_track(-1, static_cast<int>(count));
+
+    return static_cast<int>(playback_seed % count);
 }
 
 static void self_radio_station_advance_after_track_end(uint64_t now_ms)
@@ -1134,7 +1164,7 @@ bool self_radio_start_playback(uintptr_t vehicle, CSelfRadio* csr, radio_inst* r
         csr->seek_ms = g_self_radio_station.pending_start ? 0 : g_self_radio_station.seek_ms;
     }
     else if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
-        csr->current_track_index = static_cast<int>(csr->playback_seed % songs.size());
+        csr->current_track_index = self_radio_initial_track(csr->playback_seed, songs.size());
 
     const SelfRadioSong& song = songs[csr->current_track_index];
     FMOD::Sound* sound = nullptr;
@@ -1194,7 +1224,7 @@ bool self_radio_start_playback_ambient(CSelfRadio* csr, const FMOD_VECTOR& world
         csr->seek_ms = g_self_radio_station.pending_start ? 0 : g_self_radio_station.seek_ms;
     }
     else if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
-        csr->current_track_index = static_cast<int>(csr->playback_seed % songs.size());
+        csr->current_track_index = self_radio_initial_track(csr->playback_seed, songs.size());
 
     const SelfRadioSong& song = songs[csr->current_track_index];
     FMOD::Sound* sound = nullptr;
@@ -1541,7 +1571,7 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
     {
         csr->synced_to_station = false;
         if (csr->current_track_index < 0 || csr->current_track_index >= static_cast<int>(songs.size()))
-        csr->current_track_index = static_cast<int>(csr->playback_seed % songs.size());
+        csr->current_track_index = self_radio_initial_track(csr->playback_seed, songs.size());
     }
 
     if (csr->channel)
@@ -1765,7 +1795,7 @@ void Update_Ambient_CSelfRadio()
             csr.current_track_index >= static_cast<int>(songs.size()))
         {
             csr.current_track_index =
-                static_cast<int>(csr.playback_seed % songs.size());
+                self_radio_initial_track(csr.playback_seed, songs.size());
         }
     }
 
