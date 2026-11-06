@@ -8,6 +8,8 @@
 #include <cstring>
 #include <cwctype>
 #include <filesystem>
+#include <fstream>
+#include <map>
 #include <numeric>
 #include <string>
 #include <string_view>
@@ -441,6 +443,44 @@ private:
         return std::string(utf8.begin(), utf8.end());
     }
 
+    // Byte-for-byte comparison of two files (callers check the sizes match first).
+    static bool FilesHaveSameContents(const fs::path& a, const fs::path& b)
+    {
+        std::ifstream file_a(a, std::ios::binary);
+        std::ifstream file_b(b, std::ios::binary);
+        if (!file_a || !file_b)
+            return false;
+
+        std::vector<char> buffer_a(64 * 1024);
+        std::vector<char> buffer_b(64 * 1024);
+        while (file_a && file_b)
+        {
+            file_a.read(buffer_a.data(), static_cast<std::streamsize>(buffer_a.size()));
+            file_b.read(buffer_b.data(), static_cast<std::streamsize>(buffer_b.size()));
+            const std::streamsize read_a = file_a.gcount();
+            if (read_a != file_b.gcount() || std::memcmp(buffer_a.data(), buffer_b.data(), static_cast<size_t>(read_a)) != 0)
+                return false;
+        }
+        return file_a.eof() && file_b.eof();
+    }
+
+    // `kept` and the file at `duplicate_source` are the same song, so only `kept` stays in the list.
+    // It takes the duplicate's name (and file, when given) if that name is shorter, so "Song"
+    // wins over "Song - Copy" or "Song - Shortcut" whichever order the folder lists them in.
+    static void KeepOneOfDuplicates(SelfRadioSong& kept, const fs::path& duplicate_source, const fs::path* duplicate_file)
+    {
+        printf("[SelfRadio] Duplicate song, keeping one: \"%s\" and %s\n",
+            kept.name.c_str(), path_to_utf8_string(duplicate_source).c_str());
+
+        std::string duplicate_name = MakeSongName(duplicate_source);
+        if (duplicate_name.size() < kept.name.size())
+        {
+            kept.name = std::move(duplicate_name);
+            if (duplicate_file)
+                kept.path = *duplicate_file;
+        }
+    }
+
     static fs::path GetModuleDirectory(HMODULE module)
     {
         std::wstring buffer(MAX_PATH, L'\0');
@@ -542,6 +582,38 @@ private:
                         continue;
                     }
 
+                    // Same file reached twice (a song plus a shortcut to it, or two shortcuts):
+                    // keep one entry so it doesn't get double the airtime.
+                    const std::wstring path_key = NormalizePathString(song_path);
+                    if (const auto dup = m_song_by_path.find(path_key); dup != m_song_by_path.end())
+                    {
+                        KeepOneOfDuplicates(m_songs[dup->second], source_path, nullptr);
+                        continue;
+                    }
+
+                    // Copies of the same file under different names: same size and byte-for-byte
+                    // identical. Contents are only compared when the sizes match.
+                    std::error_code size_error;
+                    const uintmax_t file_size = fs::file_size(song_path, size_error);
+                    const bool size_known = !size_error && file_size > 0;
+                    if (size_known)
+                    {
+                        bool is_copy = false;
+                        const auto [same_size_begin, same_size_end] = m_song_by_size.equal_range(file_size);
+                        for (auto it = same_size_begin; it != same_size_end; ++it)
+                        {
+                            if (FilesHaveSameContents(m_songs[it->second].path, song_path))
+                            {
+                                m_song_by_path.emplace(path_key, it->second);
+                                KeepOneOfDuplicates(m_songs[it->second], source_path, &song_path);
+                                is_copy = true;
+                                break;
+                            }
+                        }
+                        if (is_copy)
+                            continue;
+                    }
+
                     FMOD::Sound* sound = nullptr;
                     const FMOD_RESULT result = CreateStreamForPath(m_system, song_path, FMOD_CREATESTREAM | FMOD_LOOP_OFF, &sound);
 
@@ -555,6 +627,11 @@ private:
                     if (sound->getLength(&length_ms, FMOD_TIMEUNIT_MS) == FMOD_OK)
                         song.length_ms = length_ms;
                     sound->release();
+
+                    m_song_by_path.emplace(path_key, m_songs.size());
+                    if (size_known)
+                        m_song_by_size.emplace(file_size, m_songs.size());
+
                     printf("[SelfRadio] Found song: %s (%s)\n", song.name.c_str(), path_to_utf8_string(song.path).c_str());
                     m_songs.push_back(std::move(song));
                 }
@@ -583,11 +660,17 @@ private:
     void ReleaseSongs()
     {
         m_songs.clear();
+        m_song_by_path.clear();
+        m_song_by_size.clear();
     }
 
 private:
     HMODULE m_module = nullptr;
     FMOD::System* m_system = nullptr;
+    // Duplicate detection while loading (values index m_songs, which is only sorted afterwards):
+    // normalized file path -> song, and file size -> songs of that size.
+    std::map<std::wstring, size_t> m_song_by_path;
+    std::multimap<uintmax_t, size_t> m_song_by_size;
     std::vector<SelfRadioSong> m_songs;
     bool m_initialized = false;
 };
@@ -629,6 +712,56 @@ float g_debug_listener_vx = 0.0f;
 float g_debug_listener_vy = 0.0f;
 float g_debug_listener_vz = 0.0f;
 
+// Bumped on every "Reload Songs": track indices saved before a reload point at different songs after it.
+static uint32_t g_song_library_generation = 0;
+
+// Tracks a radio has moved on from, most recent last, so "Prev" can step back in shuffle mode.
+struct SelfRadioTrackHistory
+{
+    static constexpr size_t kMaxTracks = 50;
+
+    std::vector<int> tracks;
+    uint32_t generation = 0;
+
+    void Push(int track)
+    {
+        DropIfStale();
+        if (track < 0)
+            return;
+        if (tracks.size() >= kMaxTracks)
+            tracks.erase(tracks.begin());
+        tracks.push_back(track);
+    }
+
+    // Most recent track that is still valid for `count` songs, or -1 if there is none.
+    int Pop(int count)
+    {
+        DropIfStale();
+        while (!tracks.empty())
+        {
+            const int track = tracks.back();
+            tracks.pop_back();
+            if (track >= 0 && track < count)
+                return track;
+        }
+        return -1;
+    }
+
+    void Clear()
+    {
+        tracks.clear();
+    }
+
+    void DropIfStale()
+    {
+        if (generation != g_song_library_generation)
+        {
+            tracks.clear();
+            generation = g_song_library_generation;
+        }
+    }
+};
+
 struct SelfRadioStationState
 {
     bool active = false;
@@ -637,6 +770,7 @@ struct SelfRadioStationState
     uint32_t seek_ms = 0;
     uint64_t start_at_ms = 0;
     uint64_t last_update_ms = 0;
+    SelfRadioTrackHistory history;
 };
 
 SelfRadioStationState g_self_radio_station{};
@@ -647,6 +781,8 @@ bool g_self_radio_sync_all_prev = false;
 static std::vector<int> g_shuffle_bag;
 static int g_shuffle_bag_count = 0;
 
+static void self_radio_on_songs_reloaded();
+
 bool self_radio_init()
 {
     return g_self_radio_song_library.Init(g_dll_module);
@@ -654,13 +790,23 @@ bool self_radio_init()
 
 size_t self_radio_reload_songs()
 {
-    g_shuffle_bag.clear(); // track indices change on reload, start a fresh round
-    return g_self_radio_song_library.ReloadSongs();
+    // Track indices change on reload: start a fresh shuffle round and forget old history.
+    g_shuffle_bag.clear();
+    ++g_song_library_generation;
+
+    const size_t count = g_self_radio_song_library.ReloadSongs();
+    self_radio_on_songs_reloaded();
+    return count;
 }
 
 const std::vector<SelfRadioSong>& self_radio_get_songs()
 {
     return g_self_radio_song_library.GetSongs();
+}
+
+static bool self_radio_is_valid_track(int track_index)
+{
+    return track_index >= 0 && track_index < static_cast<int>(self_radio_get_songs().size());
 }
 
 static uint64_t self_radio_now_ms()
@@ -754,6 +900,17 @@ static int self_radio_random_track(int current_index, int count)
     return idx;
 }
 
+// Puts a track back on top of the shuffle bag so it is the next one drawn. Used by "Prev",
+// so that pressing Next afterwards returns to the track you stepped back from.
+static void self_radio_shuffle_requeue(int track, int count)
+{
+    if (track < 0 || track >= count || g_shuffle_bag_count != count)
+        return; // the bag is rebuilt for a different library size anyway
+
+    g_shuffle_bag.erase(std::remove(g_shuffle_bag.begin(), g_shuffle_bag.end(), track), g_shuffle_bag.end());
+    g_shuffle_bag.push_back(track);
+}
+
 static int self_radio_next_track_index(int current_index, size_t count)
 {
     const int track_count = static_cast<int>(count);
@@ -783,13 +940,50 @@ static int self_radio_initial_track(uint32_t playback_seed, size_t count)
     return static_cast<int>(playback_seed % count);
 }
 
+// Moves a radio on to its next track (track ended or Next pressed), remembering the one it leaves.
+static int self_radio_advance_track(SelfRadioTrackHistory& history, int current_index, size_t count)
+{
+    history.Push(current_index);
+    return self_radio_next_track_index(current_index, count);
+}
+
+// Track to play after pressing Next (delta > 0) or Prev (delta < 0).
+// Shuffle off: plain alphabetical order, wrapping around.
+// Shuffle on:  Next draws from the shuffle bag; Prev goes back to the track this radio played
+//              before (or restarts the current one if there is no earlier track).
+static int self_radio_skip_track_index(SelfRadioTrackHistory& history, int current_index, int delta, int count)
+{
+    if (count <= 0)
+        return -1;
+
+    const bool current_valid = current_index >= 0 && current_index < count;
+
+    if (!g_self_radio_shuffle)
+    {
+        if (delta > 0)
+            history.Push(current_index);
+        const int from = current_valid ? current_index : 0;
+        return ((from + delta) % count + count) % count;
+    }
+
+    if (delta > 0)
+        return self_radio_advance_track(history, current_index, static_cast<size_t>(count));
+
+    const int previous = history.Pop(count);
+    if (previous < 0)
+        return current_valid ? current_index : self_radio_random_track(-1, count);
+
+    self_radio_shuffle_requeue(current_index, count);
+    return previous;
+}
+
 static void self_radio_station_advance_after_track_end(uint64_t now_ms)
 {
     const auto& songs = self_radio_get_songs();
     if (!g_self_radio_station.active || songs.empty())
         return;
 
-    g_self_radio_station.track_index = self_radio_next_track_index(g_self_radio_station.track_index, songs.size());
+    g_self_radio_station.track_index = self_radio_advance_track(g_self_radio_station.history, g_self_radio_station.track_index, songs.size());
     g_self_radio_station.seek_ms = 0;
     g_self_radio_station.pending_start = false;
     g_self_radio_station.start_at_ms = now_ms;
@@ -820,6 +1014,7 @@ public:
 
     int current_track_index = -1;
     uint32_t playback_seed = self_radio_random_seed();
+    SelfRadioTrackHistory history; // tracks played before this one, for "Prev" in shuffle mode
 
     uint64_t start_at_ms = 0;
     uint64_t track_started_at_ms = 0;
@@ -858,6 +1053,7 @@ public:
         vehicle_handle = 0;
         current_track_index = -1;
         playback_seed = 0;
+        history.Clear();
         start_at_ms = 0;
         track_started_at_ms = 0;
         seek_ms = 0;
@@ -1158,7 +1354,7 @@ bool self_radio_start_playback(uintptr_t vehicle, CSelfRadio* csr, radio_inst* r
     if (!system || songs.empty() || !csr || !radioi)
         return false;
 
-    if (g_self_radio_sync_all && g_self_radio_station.active && g_self_radio_station.track_index >= 0)
+    if (g_self_radio_sync_all && g_self_radio_station.active && self_radio_is_valid_track(g_self_radio_station.track_index))
     {
         csr->current_track_index = g_self_radio_station.track_index;
         csr->seek_ms = g_self_radio_station.pending_start ? 0 : g_self_radio_station.seek_ms;
@@ -1218,7 +1414,7 @@ bool self_radio_start_playback_ambient(CSelfRadio* csr, const FMOD_VECTOR& world
     if (!system || songs.empty() || !csr)
         return false;
 
-    if (g_self_radio_sync_all && g_self_radio_station.active && g_self_radio_station.track_index >= 0)
+    if (g_self_radio_sync_all && g_self_radio_station.active && self_radio_is_valid_track(g_self_radio_station.track_index))
     {
         csr->current_track_index = g_self_radio_station.track_index;
         csr->seek_ms = g_self_radio_station.pending_start ? 0 : g_self_radio_station.seek_ms;
@@ -1369,13 +1565,41 @@ static void self_radio_station_clear()
     g_self_radio_station = {};
 }
 
+// Called after "Reload Songs". The song list may now be shorter, so a synced station index can
+// point past the end of it; pick a valid track instead of reading out of bounds later.
+// (Unsynced radios already re-check their own index every update.)
+static void self_radio_on_songs_reloaded()
+{
+    if (!g_self_radio_station.active)
+        return;
+
+    const auto& songs = self_radio_get_songs();
+    if (songs.empty())
+    {
+        self_radio_station_clear();
+        return;
+    }
+
+    if (self_radio_is_valid_track(g_self_radio_station.track_index))
+        return;
+
+    const uint64_t now_ms = self_radio_now_ms();
+    g_self_radio_station.track_index = self_radio_initial_track(self_radio_random_seed(), songs.size());
+    g_self_radio_station.seek_ms = 0;
+    g_self_radio_station.pending_start = false;
+    g_self_radio_station.start_at_ms = now_ms;
+    g_self_radio_station.last_update_ms = now_ms;
+    self_radio_notify_track(songs[g_self_radio_station.track_index].name);
+}
+
 static void self_radio_station_bootstrap_from(CSelfRadio* source)
 {
-    if (!source || source->current_track_index < 0)
+    if (!source || !self_radio_is_valid_track(source->current_track_index))
         return;
 
     g_self_radio_station.active = true;
     g_self_radio_station.track_index = source->current_track_index;
+    g_self_radio_station.history = source->history; // so "Prev" still works right after Sync All turns on
     g_self_radio_station.seek_ms = source->seek_ms;
     if (source->flags.is_playing && source->channel)
     {
@@ -1460,7 +1684,7 @@ static void self_radio_station_update()
             break;
 
         g_self_radio_station.seek_ms -= length_ms;
-        g_self_radio_station.track_index = self_radio_next_track_index(g_self_radio_station.track_index, songs.size());
+        g_self_radio_station.track_index = self_radio_advance_track(g_self_radio_station.history, g_self_radio_station.track_index, songs.size());
         self_radio_notify_track(songs[g_self_radio_station.track_index].name);
     }
 }
@@ -1470,7 +1694,7 @@ static void self_radio_station_apply_to(CSelfRadio* csr, uint64_t now_ms)
     if (!g_self_radio_sync_all || !g_self_radio_station.active || !csr)
         return;
 
-    if (g_self_radio_station.track_index < 0)
+    if (!self_radio_is_valid_track(g_self_radio_station.track_index))
         return;
 
     if (g_self_radio_station.pending_start)
@@ -1606,7 +1830,7 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
             else
             {
                 csr->seek_ms = 0;
-                csr->current_track_index = self_radio_next_track_index(csr->current_track_index, songs.size());
+                csr->current_track_index = self_radio_advance_track(csr->history, csr->current_track_index, songs.size());
                 csr->flags.pending_start = 1;
                 csr->start_at_ms = now_ms;
             }
@@ -1657,7 +1881,8 @@ void self_radio_update(CSelfRadio* csr, bool switched_to_self_radio = false)
         self_radio_start_playback(vehicle, csr, radioi);
 }
 
-// Helper: skip the currently-playing CSelfRadio to another track (+1 or -1).
+// Helper: skip the currently-playing CSelfRadio to another track (+1 = Next, -1 = Prev).
+// Follows the Shuffle setting; see self_radio_skip_track_index.
 void self_radio_skip_track(CSelfRadio* csr, int delta)
 {
     if (!csr)
@@ -1677,10 +1902,20 @@ void self_radio_skip_track(CSelfRadio* csr, int delta)
         if (!g_self_radio_station.active)
             return;
 
-        g_self_radio_station.track_index = ((g_self_radio_station.track_index + delta) % n + n) % n;
+        g_self_radio_station.track_index = self_radio_skip_track_index(
+            g_self_radio_station.history, g_self_radio_station.track_index, delta, n);
         g_self_radio_station.seek_ms = 0;
         g_self_radio_station.pending_start = false;
         g_self_radio_station.last_update_ms = self_radio_now_ms();
+
+        // Make every synced radio restart from the station, even when the index didn't change
+        // (Prev with no earlier track restarts the current song).
+        for (CSelfRadio* radio : g_self_radios)
+            if (radio)
+                radio->synced_to_station = false;
+        for (auto& [ptr, radio] : g_ambient_states)
+            radio.synced_to_station = false;
+
         self_radio_notify_track(songs[g_self_radio_station.track_index].name);
         return;
     }
@@ -1700,10 +1935,7 @@ void self_radio_skip_track(CSelfRadio* csr, int delta)
     csr->flags.pending_start = 0;
     csr->seek_ms = 0;
 
-    if (csr->current_track_index < 0 || csr->current_track_index >= n)
-        csr->current_track_index = 0;
-
-    csr->current_track_index = ((csr->current_track_index + delta) % n + n) % n;
+    csr->current_track_index = self_radio_skip_track_index(csr->history, csr->current_track_index, delta, n);
 
     // Queue immediate start.
     csr->flags.pending_start = 1;
@@ -1850,7 +2082,7 @@ void Update_Ambient_CSelfRadio()
                 csr.seek_ms = 0;
 
                 const int n = static_cast<int>(songs.size());
-                csr.current_track_index = self_radio_next_track_index(csr.current_track_index, n);
+                csr.current_track_index = self_radio_advance_track(csr.history, csr.current_track_index, n);
 
                 csr.flags.pending_start = 1;
                 csr.start_at_ms = now_ms;
@@ -1976,7 +2208,7 @@ void BlingMenuOptions() {
 
     g_self_radio_volume = std::clamp(ini.ReadFloat("OPTIONS", "Volume", 0.45f),0.f,4.f);
     g_self_radio_sync_all = ini.ReadBoolean("OPTIONS", "Sync All", false);
-    g_self_radio_shuffle = ini.ReadBoolean("OPTIONS", "Shuffle", false);
+    g_self_radio_shuffle = ini.ReadBoolean("OPTIONS", "Shuffle", true);
     g_self_radio_random_start = ini.ReadBoolean("OPTIONS", "Random Start", false);
     g_self_radio_min_distance = ini.ReadFloat("OPTIONS", "3D Min Distance", 2.f);
     g_self_radio_max_distance = ini.ReadFloat("OPTIONS", "3D Max Distance", 45.f);
